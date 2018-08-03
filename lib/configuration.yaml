@@ -15028,6 +15028,11 @@ devnet: &devnet
           avvmBalanceFactor: 1
           useHeavyDlg: True
           seed: 0
+        blockVersionData:
+          <<: *mainnet_base_blockVersionData
+          maxHeaderSize:      2000
+          maxProposalSize:   70000 # 70KB
+          maxTxSize:         65536 # 64KiB
 
   update: &devnet_update
     applicationName: cardano-sl
