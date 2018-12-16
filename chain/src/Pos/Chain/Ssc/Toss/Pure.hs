@@ -16,21 +16,21 @@ import           Universum hiding (id)
 
 import           Control.Lens (at, uses, (%=), (.=))
 import qualified Crypto.Random as Rand
-import           System.Wlog (CanLog, HasLoggerName (..), LogEvent,
-                     NamedPureLogger (..), WithLogger, dispatchEvents,
-                     runNamedPureLog)
 
 import           Pos.Chain.Lrc (RichmenSet, RichmenStakes)
 import           Pos.Chain.Ssc.Base (deleteSignedCommitment,
                      insertSignedCommitment)
+import           Pos.Chain.Ssc.Functions (getStableCertsPure)
 import           Pos.Chain.Ssc.Toss.Class (MonadToss (..), MonadTossEnv (..),
                      MonadTossRead (..))
 import           Pos.Chain.Ssc.Types (SscGlobalState, sgsCommitments,
                      sgsOpenings, sgsShares, sgsVssCertificates)
 import qualified Pos.Chain.Ssc.VssCertData as VCD
-import           Pos.Core (EpochIndex, HasGenesisData, HasProtocolConstants,
-                     crucialSlot, genesisVssCerts)
-import           Pos.Core.Update (BlockVersionData)
+import           Pos.Chain.Update (BlockVersionData)
+import           Pos.Core (EpochIndex)
+import           Pos.Util.Wlog (CanLog, HasLoggerName (..), LogEvent,
+                     NamedPureLogger (..), WithLogger, dispatchEvents,
+                     runNamedPureLog)
 
 type MultiRichmenStakes = HashMap EpochIndex RichmenStakes
 type MultiRichmenSet   = HashMap EpochIndex RichmenSet
@@ -51,25 +51,22 @@ newtype PureTossWithEnv a = PureTossWithEnv
     } deriving (Functor, Applicative, Monad, Rand.MonadRandom,
                 CanLog, HasLoggerName)
 
-deriving instance (HasProtocolConstants, HasGenesisData) => MonadTossRead PureTossWithEnv
-deriving instance (HasProtocolConstants, HasGenesisData) => MonadToss PureTossWithEnv
+deriving instance MonadTossRead PureTossWithEnv
+deriving instance MonadToss PureTossWithEnv
 
-instance (HasGenesisData, HasProtocolConstants) => MonadTossRead PureToss where
+instance MonadTossRead PureToss where
     getCommitments = PureToss $ use sgsCommitments
     getOpenings = PureToss $ use sgsOpenings
     getShares = PureToss $ use sgsShares
     getVssCertificates = PureToss $ uses sgsVssCertificates VCD.certs
-    getStableCertificates epoch
-        | epoch == 0 = pure $ genesisVssCerts
-        | otherwise = PureToss $
-            uses sgsVssCertificates $
-                VCD.certs . VCD.setLastKnownSlot (crucialSlot epoch)
+    getStableCertificates genesisConfig epoch =
+        PureToss $ uses sgsVssCertificates $ getStableCertsPure genesisConfig epoch
 
 instance MonadTossEnv PureTossWithEnv where
     getRichmen epoch = PureTossWithEnv $ view (_1 . at epoch)
     getAdoptedBVData = PureTossWithEnv $ view _2
 
-instance (HasProtocolConstants, HasGenesisData) => MonadToss PureToss where
+instance MonadToss PureToss where
     putCommitment signedComm =
         PureToss $ sgsCommitments %= insertSignedCommitment signedComm
     putOpening id op = PureToss $ sgsOpenings . at id .= Just op

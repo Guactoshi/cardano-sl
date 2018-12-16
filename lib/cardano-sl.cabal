@@ -1,5 +1,5 @@
 name:                cardano-sl
-version:             1.3.0
+version:             2.0.0
 synopsis:            Cardano SL main implementation
 description:         Please see README.md
 license:             MIT
@@ -64,6 +64,9 @@ library
                         Pos.Network.Block.Types
                         Pos.Network.Block.WorkMode
 
+                        -- Node management API
+                        Pos.Node.API
+
                         -- cardano-sl-client & cardano-sl-generator
                         Pos.Communication.Limits
                         Pos.Communication.Types
@@ -85,6 +88,7 @@ library
                         -- Utilities/helpers
                         Pos.Util.Config
                         Pos.Util.OutboundQueue
+                        Pos.Util.UserKeyError
                         Pos.Util.UserSecret
 
                         Pos.Web
@@ -112,14 +116,17 @@ library
                         Test.Pos.Configuration
 
                         Pos.Util.Servant
+                        Pos.Util.Swagger
+                        Pos.Util.Jsend
+                        Pos.Util.UnitsOfMeasure
+                        Pos.Util.Pagination
+                        Pos.Util.Example
+                        Pos.Util.KnownSymbols
 
 
   other-modules:
                         -- NodeContext
                         Pos.Context.Context
-
-                        -- Crypto
-                        Pos.Crypto.HDDiscovery
 
                         -- GState
                         Pos.GState.Context
@@ -135,13 +142,11 @@ library
                         Pos.Communication.Server
 
   build-depends:        base
-                      , QuickCheck
-                      , async
                       , aeson >= 0.11.2.1
                       , aeson-options
-                      , async
                       , ansi-terminal
                       , ansi-wl-pprint
+                      , async
                       , bytestring
                       , canonical-json
                       , cardano-sl-binary
@@ -162,20 +167,23 @@ library
                       , data-default
                       , directory
                       , ekg-core
+                      , ekg
                       , ether >= 0.5
                       , exceptions
                       , filelock >= 0.1.0.1
                       , filepath
                       , formatting
-                      , generic-arbitrary
+                      , formatting
+                      , generics-sop
                       , hspec
+                      , http-api-data
                       , http-client
                       , http-client-tls
                       , http-conduit
+                      , http-types
                       , lens
-                      , log-warper >= 1.1.1
+                      , lifted-async
                       , memory
-                      , mmorph
                       , monad-control
                       , mtl
                       , neat-interpolation
@@ -184,6 +192,8 @@ library
                       , optparse-applicative
                       , parsec
                       , pvss
+                      , QuickCheck
+                      , quickcheck-instances
                       , random
                       , reflection
                       , safe-exceptions
@@ -193,12 +203,15 @@ library
                       , servant-client-core >= 0.8.1
                       , servant-server >= 0.8.1
                       , servant-swagger
+                      , servant-swagger-ui
+                      , servant-swagger-ui-core
+                      , servant-swagger-ui-redoc
                       , stm
                       , streaming-commons
+                      , swagger2
                       , tagged
                       , template-haskell
                       , text
-                      , formatting
                       , time
                       , time-units
                       , tls
@@ -213,8 +226,6 @@ library
                       , x509-store
                       , x509-validation
                       , yaml
-                      -- https://issues.serokell.io/issue/DEVOPS-230
-                      , cpphs
                       -- Required for common test modules
                       , cborg
 
@@ -241,7 +252,6 @@ library
                         DefaultSignatures
                         NoImplicitPrelude
                         OverloadedStrings
-                        RecordWildCards
                         TypeApplications
                         TupleSections
                         ViewPatterns
@@ -277,11 +287,13 @@ test-suite cardano-test
                        -- Everything else
                        Test.Pos.Block.Arbitrary.Message
                        Test.Pos.Block.CborSpec
+                       Test.Pos.Cbor.Arbitrary.UserSecret
                        Test.Pos.Cbor.CborSpec
                        Test.Pos.ConstantsSpec
                        Test.Pos.Diffusion.BlockSpec
                        Test.Pos.Genesis.CanonicalSpec
                        Test.Pos.Launcher.ConfigurationSpec
+                       Test.Pos.Launcher.Json
                        Test.Pos.MerkleSpec
                        Test.Pos.Infra.Slotting.TypesSpec
                        Test.Pos.Types.Identity.SafeCopySpec
@@ -321,9 +333,9 @@ test-suite cardano-test
                      , filelock
                      , formatting
                      , generic-arbitrary
+                     , hedgehog
                      , hspec
                      , lens
-                     , log-warper
                      , network-transport
                      , network-transport-inmemory
                      , pvss
@@ -336,6 +348,7 @@ test-suite cardano-test
                      , time-units
                      , universum >= 0.1.11
                      , unordered-containers
+  build-tool-depends: hspec-discover:hspec-discover
 
   hs-source-dirs:      test
   default-language:    Haskell2010
@@ -359,7 +372,6 @@ test-suite cardano-test
                         DefaultSignatures
                         NoImplicitPrelude
                         OverloadedStrings
-                        RecordWildCards
                         TypeApplications
                         TupleSections
                         ViewPatterns
@@ -404,9 +416,8 @@ benchmark cardano-bench-criterion
                      , deepseq
                      , formatting
                      , network-transport
-                     , network-transport-tcp
+                     , network-transport-inmemory
                      , optparse-applicative
-                     , time-units
                      , universum >= 0.1.11
   default-language:    Haskell2010
   ghc-options:         -threaded -rtsopts
@@ -429,7 +440,6 @@ benchmark cardano-bench-criterion
                         DefaultSignatures
                         NoImplicitPrelude
                         OverloadedStrings
-                        RecordWildCards
                         TypeApplications
                         TupleSections
                         ViewPatterns

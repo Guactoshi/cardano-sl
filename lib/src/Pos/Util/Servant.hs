@@ -1,9 +1,14 @@
 {-# LANGUAGE AllowAmbiguousTypes       #-}
 {-# LANGUAGE CPP                       #-}
 {-# LANGUAGE DataKinds                 #-}
+{-# LANGUAGE DeriveFunctor             #-}
 {-# LANGUAGE ExistentialQuantification #-}
+{-# LANGUAGE FlexibleContexts          #-}
+{-# LANGUAGE InstanceSigs              #-}
 {-# LANGUAGE KindSignatures            #-}
+{-# LANGUAGE OverloadedLists           #-}
 {-# LANGUAGE Rank2Types                #-}
+{-# LANGUAGE RecordWildCards           #-}
 {-# LANGUAGE TypeFamilies              #-}
 {-# LANGUAGE TypeOperators             #-}
 
@@ -14,7 +19,6 @@
 -- Redundant constraint: api ~ someApiType n a
 -- in `apiArgName`
 {-# OPTIONS_GHC -Wno-redundant-constraints #-}
-
 
 -- | Some utilites for more flexible servant usage.
 
@@ -52,44 +56,81 @@ module Pos.Util.Servant
     , DReqBody
     , DCQueryParam
     , DQueryParam
+    , DHeader
+
+    , Flaggable (..)
+    , CustomQueryFlag
+    , HasCustomQueryFlagDescription(..)
 
     , serverHandlerL
     , serverHandlerL'
     , inRouteServer
 
+    , applicationJson
     , applyLoggingToHandler
+    , ValidJSON
+    , Tags
+    , mapRouter
+    , APIResponse(..)
+    , single
+    , Metadata(..)
+    , UnknownError(..)
+    , JsendException(..)
     ) where
 
-import           Universum hiding (id)
+import           Universum
 
 import           Control.Exception.Safe (handleAny)
-import           Control.Lens (Iso, iso, makePrisms)
+import           Control.Lens (Iso, iso, ix, makePrisms, (?~))
 import           Control.Monad.Except (ExceptT (..), MonadError (..))
+import           Data.Aeson (FromJSON (..), ToJSON (..), eitherDecode, encode,
+                     object, (.=))
+import qualified Data.Aeson.Options as Aeson
+import           Data.Aeson.TH (deriveJSON)
+import qualified Data.Char as Char
 import           Data.Constraint ((\\))
 import           Data.Constraint.Forall (Forall, inst)
 import           Data.Default (Default (..))
+import           Data.List (lookup)
 import           Data.Reflection (Reifies (..), reflect)
+import qualified Data.Set as Set
+import           Data.Swagger as S hiding (Example, Header, example, info)
 import qualified Data.Text as T
 import           Data.Time.Clock.POSIX (getPOSIXTime)
+import           Data.Typeable (typeOf, typeRep)
 import           Formatting (bprint, build, builder, fconst, formatToString,
                      sformat, shown, stext, string, (%))
 import qualified Formatting.Buildable
+import           Generics.SOP.TH (deriveGeneric)
 import           GHC.IO.Unsafe (unsafePerformIO)
-import           GHC.TypeLits (KnownSymbol, symbolVal)
+import           GHC.TypeLits (KnownSymbol, Symbol, symbolVal)
+import           Network.HTTP.Types (hContentType, parseQueryText)
+import qualified Network.HTTP.Types as HTTPTypes
+import           Network.Wai (rawQueryString)
 import           Serokell.Util (listJsonIndent)
 import           Serokell.Util.ANSI (Color (..), colorizeDull)
-import           Servant.API ((:<|>) (..), (:>), Capture, Description,
-                     QueryParam, ReflectMethod (..), ReqBody, Summary, Verb)
+import           Servant.API ((:<|>) (..), (:>), Capture, Description, Header,
+                     OctetStream, QueryFlag, QueryParam, ReflectMethod (..),
+                     ReqBody, Summary, Verb)
+import           Servant.API.ContentTypes (Accept (..), JSON, MimeRender (..),
+                     MimeUnrender (..))
 import           Servant.Client (Client, HasClient (..))
 import           Servant.Client.Core (RunClient)
 import           Servant.Server (Handler (..), HasServer (..), ServantErr (..),
                      Server)
 import qualified Servant.Server.Internal as SI
-import           Servant.Swagger (HasSwagger (toSwagger))
-import           System.Wlog (LoggerName, LoggerNameBox, usingLoggerName)
+import           Servant.Swagger
+import           Servant.Swagger.Internal
+import           Test.QuickCheck
 
-import           Pos.Infra.Util.LogSafe (BuildableSafe, SecureLog, SecuredText,
-                     buildSafe, logInfoSP, plainOrSecureF, secretOnlyF)
+import           Pos.Infra.Util.LogSafe (BuildableSafe, SecuredText, buildSafe,
+                     logInfoSP, plainOrSecureF, secretOnlyF)
+import           Pos.Util.Example (Example (..))
+import           Pos.Util.Jsend (HasDiagnostic (..), ResponseStatus (..),
+                     jsendErrorGenericParseJSON, jsendErrorGenericToJSON)
+import           Pos.Util.KnownSymbols
+import           Pos.Util.Pagination
+import           Pos.Util.Wlog (LoggerName, LoggerNameBox, usingLoggerName)
 
 -------------------------------------------------------------------------
 -- Utility functions
@@ -136,9 +177,9 @@ class ApiHasArgClass api where
     apiArgName _ = formatToString ("'"%string%"' field") $ symbolVal (Proxy @n)
 
 class ServerT (subApi :> res) m ~ (ApiArg subApi -> ServerT res m)
-   => ApiHasArgInvariant subApi res m
+    => ApiHasArgInvariant subApi res m
 instance ServerT (subApi :> res) m ~ (ApiArg subApi -> ServerT res m)
-      => ApiHasArgInvariant subApi res m
+    => ApiHasArgInvariant subApi res m
 
 type ApiHasArg subApi res =
     ( ApiHasArgClass subApi
@@ -147,6 +188,13 @@ type ApiHasArg subApi res =
     )
 
 instance KnownSymbol s => ApiHasArgClass (Capture s a)
+
+instance KnownSymbol s => ApiHasArgClass (QueryFlag s) where
+    type ApiArg (QueryFlag s) = Bool
+
+    apiArgName :: Proxy (QueryFlag s) -> String
+    apiArgName _ = formatToString ("'"%string%"' field") $ symbolVal (Proxy @s)
+
 instance KnownSymbol s => ApiHasArgClass (QueryParam s a) where
     type ApiArg (QueryParam s a) = Maybe a
 instance ApiHasArgClass (ReqBody ct a) where
@@ -319,17 +367,23 @@ instance HasSwagger (subApi :> res) =>
 instance HasClient m (subApi :> res) => HasClient m (CDecodeApiArg subApi :> res) where
     type Client m (CDecodeApiArg subApi :> res) = Client m (subApi :> res)
     clientWithRoute p _ req = clientWithRoute p (Proxy @(subApi :> res)) req
+    hoistClientMonad pm _ f cl =
+        hoistClientMonad pm (Proxy @(subApi :> res)) f cl
 
 instance HasClient m (subApi :> res) =>
          HasClient m (WithDefaultApiArg subApi :> res) where
     type Client m (WithDefaultApiArg subApi :> res) = Client m (subApi :> res)
     clientWithRoute p _ req = clientWithRoute p (Proxy @(subApi :> res)) req
+    hoistClientMonad pm _ f cl =
+        hoistClientMonad pm (Proxy @(subApi :> res)) f cl
 
 instance (RunClient m, HasClient m (Verb mt st ct $ ApiModifiedRes mod a)) =>
          HasClient m (VerbMod mod (Verb (mt :: k1) (st :: Nat) (ct :: [*]) a)) where
     type Client m (VerbMod mod (Verb mt st ct a)) = Client m (Verb mt st ct $ ApiModifiedRes mod a)
     clientWithRoute p _ req =
         clientWithRoute p (Proxy @(Verb mt st ct $ ApiModifiedRes mod a)) req
+    hoistClientMonad pm _ f cl =
+        hoistClientMonad pm (Proxy @(Verb mt st ct $ ApiModifiedRes mod a)) f cl
 
 -------------------------------------------------------------------------
 -- Logging
@@ -471,13 +525,13 @@ class ApiHasArgClass subApi =>
         :: BuildableSafe (ApiArgToLog subApi)
         => Proxy subApi -> ApiArg subApi -> SecuredText
     default toLogParamInfo
-        :: ( Buildable (ApiArg subApi)
-           , Buildable (SecureLog (ApiArg subApi))
-           )
+        :: BuildableSafe (ApiArg subApi)
         => Proxy subApi -> ApiArg subApi -> SecuredText
     toLogParamInfo _ param = \sl -> sformat (buildSafe sl) param
 
 instance KnownSymbol s => ApiCanLogArg (Capture s a)
+
+instance KnownSymbol s => ApiCanLogArg (QueryFlag s)
 
 instance ApiCanLogArg (ReqBody ct a)
 
@@ -528,9 +582,8 @@ instance {-# OVERLAPPABLE #-}
          , ApiHasArg subApi (LoggingApiRec config res)
          , ApiCanLogArg subApi
          , BuildableSafe (ApiArgToLog subApi)
-         , subApi ~ apiType a
          ) =>
-         HasLoggingServer config (apiType a :> res) ctx where
+         HasLoggingServer config (subApi :> res) ctx where
     routeWithLog = paramRouteWithLog
 
 instance {-# OVERLAPPING #-}
@@ -548,7 +601,7 @@ instance {-# OVERLAPPING #-}
 newtype RequestId = RequestId Integer
 
 instance Buildable RequestId where
-    build (RequestId id) = bprint ("#"%build) id
+    build (RequestId id') = bprint ("#"%build) id'
 
 -- | We want all servant servers to have non-overlapping ids,
 -- so using singleton counter here.
@@ -638,9 +691,9 @@ applyServantLogging configP methodP paramsInfo showResponse action = do
     catchErrors reqId st =
         flip catchError (servantErrHandler reqId st) .
         handleAny (exceptionsHandler reqId st)
-    servantErrHandler reqId timer err@ServantErr{..} = do
+    servantErrHandler reqId timer err = do
         durationText <- timer
-        let errMsg = sformat (build%" "%string) errHTTPCode errReasonPhrase
+        let errMsg = sformat (build%" "%string) (errHTTPCode err) (errReasonPhrase err)
         inLogCtx $ logInfoSP $ \_sl ->
             sformat ("\n    "%stext%" "%stext%" "%stext)
                 (colorizeDull White $ responseTag reqId)
@@ -699,6 +752,82 @@ instance ReportDecodeError api =>
     reportDecodeError _ msg =
         (ApiNoParamsLogInfo msg, reportDecodeError (Proxy @api) msg)
 
+
+-------------------------------------------------------------------------
+-- Custom query flag
+-------------------------------------------------------------------------
+
+-- This type is used as a helper to implement custom query flags.
+-- Instead of using `QueryFlag "some_flag"` which should serialize
+-- into boolean flag now we can say `CustomQueryFlag "some_flag" SomeFlag`
+-- where SomeFlag has instance of Flaggable. This way we won't be using
+-- Boolean type for all flags but we can implement custom type.
+data CustomQueryFlag (sym :: Symbol) flag
+
+instance
+    ( KnownSymbol sym
+    , HasSwagger sub
+    , HasCustomQueryFlagDescription sym
+    ) => HasSwagger (CustomQueryFlag sym flag :> sub)
+  where
+    toSwagger _ = toSwagger (Proxy :: Proxy sub)
+        & addParam param
+        & addDefaultResponse400 tname
+      where
+        tname = T.pack (symbolVal (Proxy :: Proxy sym))
+        param = mempty
+            & name .~ tname
+            & description .~ customDescription (Proxy @sym)
+            & schema .~ ParamOther (mempty
+                & in_ .~ ParamQuery
+                & allowEmptyValue ?~ True
+                & paramSchema .~ (toParamSchema (Proxy :: Proxy Bool)
+                    & default_ ?~ toJSON False))
+
+class HasCustomQueryFlagDescription (sym :: Symbol) where
+    customDescription :: Proxy sym -> Maybe Text
+    customDescription _ = Nothing
+
+class Flaggable flag where
+    toBool :: flag -> Bool
+    fromBool :: Bool -> flag
+
+instance Flaggable Bool where
+    toBool = identity
+    fromBool = identity
+
+instance (KnownSymbol sym, HasServer api context, Flaggable flag)
+    => HasServer (CustomQueryFlag sym flag :> api) context where
+
+    type ServerT (CustomQueryFlag sym flag :> api) m =
+        flag -> ServerT api m
+
+    hoistServerWithContext _ pc nt s = hoistServerWithContext (Proxy @api) pc nt . s
+
+    route Proxy context subserver =
+        let querytext r = parseQueryText $ rawQueryString r
+            param r = case lookup paramname (querytext r) of
+                Just Nothing  -> True  -- param is there, with no value
+                Just (Just v) -> examine v -- param with a value
+                Nothing       -> False -- param not in the query string
+         in route (Proxy @api) context (SI.passToServer subserver $ fromBool . param)
+      where
+        paramname = toText $ symbolVal (Proxy @sym)
+        examine v
+            | v == "true" || v == "1" || v == "" = True
+            | otherwise = False
+
+instance (KnownSymbol sym, Flaggable flag, HasClient m api)
+    => HasClient m (CustomQueryFlag sym flag :> api) where
+    type Client m (CustomQueryFlag sym flag :> api) = flag -> Client m api
+
+    clientWithRoute p _ req = clientWithRoute p (Proxy @(QueryFlag sym :> api)) req . toBool
+
+    hoistClientMonad pm _ f cl = \as -> hoistClientMonad pm (Proxy :: Proxy api) f (cl as)
+
+instance KnownSymbol s => ApiCanLogArg (CustomQueryFlag s a)
+instance KnownSymbol s => ApiHasArgClass (CustomQueryFlag s a)
+
 -------------------------------------------------------------------------
 -- API construction Helpers
 -------------------------------------------------------------------------
@@ -712,3 +841,217 @@ type DReqBody c a    = WithDefaultApiArg (ReqBody c a)
 type DCQueryParam s a = WithDefaultApiArg (CDecodeApiArg $ QueryParam s a)
 
 type DQueryParam s a = WithDefaultApiArg (QueryParam s a)
+type DHeader s a = WithDefaultApiArg (Header s a)
+
+--
+-- Creating a better user experience when it comes to errors.
+--
+
+data ValidJSON deriving Typeable
+
+instance FromJSON a => MimeUnrender ValidJSON a where
+    mimeUnrender _ bs = case eitherDecode bs of
+        Left err -> Left $ decodeUtf8 $ encode (JSONValidationFailed $ toText err)
+        Right v  -> return v
+
+instance Accept ValidJSON where
+    contentTypes _ = contentTypes (Proxy @ JSON)
+
+instance ToJSON a => MimeRender ValidJSON a where
+    mimeRender _ = mimeRender (Proxy @ JSON)
+
+--
+-- Error from parsing / validating JSON inputs
+--
+
+newtype JSONValidationError
+    = JSONValidationFailed Text
+    deriving (Eq, Show, Generic)
+
+deriveGeneric ''JSONValidationError
+
+instance Exception JSONValidationError
+
+instance Arbitrary JSONValidationError where
+    arbitrary =
+        pure (JSONValidationFailed "JSON validation failed.")
+
+instance Buildable JSONValidationError where
+    build _ =
+        bprint "Couldn't decode a JSON input."
+
+instance ToJSON JSONValidationError where
+    toJSON =
+        jsendErrorGenericToJSON
+
+instance FromJSON JSONValidationError where
+    parseJSON =
+        jsendErrorGenericParseJSON
+
+instance HasDiagnostic JSONValidationError where
+    getDiagnosticKey _ =
+        "validationError"
+
+-- | An empty type which can be used to inject Swagger tags at the type level,
+-- directly in the Servant API.
+data Tags (tags :: [Symbol])
+
+-- | Instance of `HasServer` which erases the `Tags` from its routing,
+-- as the latter is needed only for Swagger.
+instance (HasServer subApi context) => HasServer (Tags tags :> subApi) context where
+    type ServerT (Tags tags :> subApi) m = ServerT subApi m
+    route _ = route (Proxy @subApi)
+    hoistServerWithContext _ = hoistServerWithContext (Proxy @subApi)
+
+instance (HasClient m subApi) => HasClient m (Tags tags :> subApi) where
+    type Client m (Tags tags :> subApi) = Client m subApi
+    clientWithRoute pm _ = clientWithRoute pm (Proxy @subApi)
+    hoistClientMonad pm _ f cl =
+      hoistClientMonad pm (Proxy @subApi) f cl
+
+-- | Similar to 'instance HasServer', just skips 'Tags'.
+instance HasLoggingServer config subApi context =>
+    HasLoggingServer config (Tags tags :> subApi) context where
+    routeWithLog = mapRouter @(Tags tags :> LoggingApiRec config subApi) route identity
+
+instance (KnownSymbols tags, HasSwagger subApi) => HasSwagger (Tags tags :> subApi) where
+    toSwagger _ =
+        let newTags    = map toText (symbolVals (Proxy @tags))
+            swgr       = toSwagger (Proxy @subApi)
+        in swgr & over (operationsOf swgr . tags) (mappend (Set.fromList newTags))
+
+-- | `mapRouter` is helper function used in order to transform one `HasServer`
+-- instance to another. It can be used to introduce custom request params type.
+-- See e. g. `WithDefaultApiArg` as an example of usage
+mapRouter
+    :: forall api api' ctx env.
+       (Proxy api -> SI.Context ctx -> SI.Delayed env (Server api) -> SI.Router env)
+    -> (Server api' -> Server api)
+    -> (Proxy api' -> SI.Context ctx -> SI.Delayed env (Server api') -> SI.Router env)
+mapRouter routing f = \_ ctx delayed -> routing Proxy ctx (fmap f delayed)
+
+-- | Extra information associated with an HTTP response.
+data Metadata = Metadata
+  { metaPagination   :: PaginationMetadata
+    -- ^ Pagination-specific metadata
+  } deriving (Show, Eq, Generic)
+
+deriveJSON Aeson.defaultOptions ''Metadata
+
+instance Arbitrary Metadata where
+    arbitrary = Metadata <$> arbitrary
+
+instance Example Metadata
+
+instance ToSchema Metadata where
+    declareNamedSchema = genericDeclareNamedSchema defaultSchemaOptions
+        { S.fieldLabelModifier =
+            over (ix 0) Char.toLower . drop 4 -- length "meta"
+        }
+
+instance Buildable Metadata where
+    build Metadata{..} =
+       bprint ("{ pagination="%build%" }") metaPagination
+
+-- instance Example Metadata
+
+
+-- | An `APIResponse` models, unsurprisingly, a response (successful or not)
+-- produced by the wallet backend.
+-- Includes extra informations like pagination parameters etc.
+data APIResponse a = APIResponse
+  { wrData   :: a
+  -- ^ The wrapped domain object.
+  , wrStatus :: ResponseStatus
+  -- ^ The <https://labs.omniti.com/labs/jsend jsend> status.
+  , wrMeta   :: Metadata
+  -- ^ Extra metadata to be returned.
+  } deriving (Show, Eq, Generic, Functor)
+
+deriveJSON Aeson.defaultOptions ''APIResponse
+
+instance Arbitrary a => Arbitrary (APIResponse a) where
+    arbitrary = APIResponse <$> arbitrary <*> arbitrary <*> arbitrary
+
+instance ToJSON a => MimeRender OctetStream (APIResponse a) where
+    mimeRender _ = encode
+
+instance (ToSchema a, Typeable a) => ToSchema (APIResponse a) where
+    declareNamedSchema _ = do
+        let a = Proxy @a
+            tyName = toText $ map sanitize (show $ typeRep a :: String)
+            sanitize c
+                | c `elem` (":/?#[]@!$&'()*+,;=" :: String) = '_'
+                | otherwise = c
+        aRef <- declareSchemaRef a
+        respRef <- declareSchemaRef (Proxy @ResponseStatus)
+        metaRef <- declareSchemaRef (Proxy @Metadata)
+        pure $ NamedSchema (Just $ "APIResponse-" <> tyName) $ mempty
+            & type_ .~ SwaggerObject
+            & required .~ ["data", "status", "meta"]
+            & properties .~
+                [ ("data", aRef)
+                , ("status", respRef)
+                , ("meta", metaRef)
+                ]
+
+instance Buildable a => Buildable (APIResponse a) where
+    build APIResponse{..} = bprint
+        ("\n\tstatus="%build
+        %"\n\tmeta="%build
+        %"\n\tdata="%build
+        )
+        wrStatus
+        wrMeta
+        wrData
+
+instance Example a => Example (APIResponse a) where
+    example = APIResponse <$> example
+                             <*> pure SuccessStatus
+                             <*> example
+
+-- | Creates a 'APIResponse' with just a single record into it.
+single :: a -> APIResponse a
+single theData = APIResponse {
+      wrData   = theData
+    , wrStatus = SuccessStatus
+    , wrMeta   = Metadata (PaginationMetadata 1 (Page 1) (PerPage 1) 1)
+    }
+
+-- | Generates the @Content-Type: application/json@ 'HTTP.Header'.
+applicationJson :: HTTPTypes.Header
+applicationJson =
+    (hContentType, "application/json")
+
+-- | An error for representing unknown problems in the API. The Jsen
+newtype UnknownError = UnknownError Text
+    deriving (Show, Generic)
+
+deriveGeneric ''UnknownError
+
+instance Exception UnknownError
+
+instance HasDiagnostic UnknownError where
+    getDiagnosticKey _ = "unknownErrorMessage"
+
+instance ToJSON UnknownError where
+    toJSON = jsendErrorGenericToJSON
+
+instance FromJSON UnknownError where
+    parseJSON = jsendErrorGenericParseJSON
+
+-- | A newtype around 'SomeException' that provides a JSend compliant 'ToJSON'
+-- rendering. Use this only in debugging to provide a ToJSON instance for
+-- unknown exceptions.
+newtype JsendException = JsendException SomeException
+    deriving (Show, Exception)
+
+instance ToJSON JsendException where
+    toJSON (JsendException exn) =
+        object
+            [ "message" .= show @Text (typeOf exn)
+            , "status" .= ErrorStatus
+            , "diagnostic" .= object
+                [ "debugException" .= show @Text exn
+                ]
+            ]

@@ -1,3 +1,5 @@
+{-# LANGUAGE RecordWildCards #-}
+
 module Pos.DB.Ssc.SecretStorage
        ( getOurCommitment
        , getOurOpening
@@ -6,9 +8,9 @@ module Pos.DB.Ssc.SecretStorage
 
 import           Universum
 
-import           Pos.Chain.Ssc (SscSecretStorage (..))
+import           Pos.Chain.Ssc (Opening, SignedCommitment,
+                     SscSecretStorage (..))
 import           Pos.Core (EpochIndex)
-import           Pos.Core.Ssc (Opening, SignedCommitment)
 import           Pos.DB (MonadDB, MonadDBRead)
 import           Pos.DB.Misc.Common (miscGetBi, miscPutBi)
 

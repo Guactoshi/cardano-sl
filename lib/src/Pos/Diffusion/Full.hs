@@ -32,8 +32,15 @@ import qualified System.Metrics as Monitoring
 
 import           System.Random (newStdGen)
 
-import           Pos.Chain.Ssc (MCCommitment (..), MCOpening (..),
-                     MCShares (..), MCVssCertificate (..))
+import           Pos.Chain.Block (Block, BlockHeader, HeaderHash,
+                     MainBlockHeader)
+import           Pos.Chain.Delegation (ProxySKHeavy)
+import           Pos.Chain.Ssc (InnerSharesMap, MCCommitment (..),
+                     MCOpening (..), MCShares (..), MCVssCertificate (..),
+                     Opening, SignedCommitment, VssCertificate)
+import           Pos.Chain.Txp (TxAux)
+import           Pos.Chain.Update (BlockVersion, BlockVersionData (..), UpId,
+                     UpdateProposal, UpdateVote)
 import           Pos.Communication (EnqueueMsg, HandlerSpecs, InSpecs (..),
                      InvOrDataTK, Listener, MkListeners (..), Msg,
                      MsgSubscribe, MsgSubscribe1, NodeId, OutSpecs (..),
@@ -41,17 +48,9 @@ import           Pos.Communication (EnqueueMsg, HandlerSpecs, InSpecs (..),
                      bipPacking, convH, createOutSpecs, makeEnqueueMsg,
                      makeSendActions, toOutSpecs)
 import           Pos.Core (ProtocolConstants (..), StakeholderId)
-import           Pos.Core.Block (Block, BlockHeader, HeaderHash,
-                     MainBlockHeader)
 import           Pos.Core.Chrono (OldestFirst)
-import           Pos.Core.Delegation (ProxySKHeavy)
 import           Pos.Core.Metrics.Constants (withCardanoNamespace)
-import           Pos.Core.Ssc (InnerSharesMap, Opening, SignedCommitment,
-                     VssCertificate)
-import           Pos.Core.Txp (TxAux)
-import           Pos.Core.Update (BlockVersion, BlockVersionData (..), UpId,
-                     UpdateProposal, UpdateVote)
-import           Pos.Crypto.Configuration (ProtocolMagic (..))
+import           Pos.Crypto.Configuration (ProtocolMagic (..), getProtocolMagic)
 import qualified Pos.Diffusion.Full.Block as Diffusion.Block
 import qualified Pos.Diffusion.Full.Delegation as Diffusion.Delegation
 import qualified Pos.Diffusion.Full.Ssc as Diffusion.Ssc
@@ -129,7 +128,7 @@ diffusionLayerFull fdconf networkConfig mEkgNodeMetrics mkLogic k = do
     oq :: OQ.OutboundQ EnqueuedConversation NodeId Bucket <-
         -- NB: <> it's not Text semigroup append, it's LoggerName append, which
         -- puts a "." in the middle.
-        initQueue networkConfig ("diffusion" <> "outboundqueue") (enmStore <$> mEkgNodeMetrics)
+        initQueue networkConfig ("diffusion.outboundqueue") (enmStore <$> mEkgNodeMetrics)
     let topology = ncTopology networkConfig
         mSubscriptionWorker = topologySubscriptionWorker topology
         mSubscribers = topologySubscribers topology

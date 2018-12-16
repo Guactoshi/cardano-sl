@@ -1,10 +1,11 @@
+{-# LANGUAGE LambdaCase      #-}
 {-# LANGUAGE TemplateHaskell #-}
 
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 
 -- | `Arbitrary` instances for Txp types
 
-module Test.Pos.Core.Arbitrary.Txp
+module Test.Pos.Chain.Txp.Arbitrary
        ( BadSigsTx (..)
        , DoubleInputTx (..)
        , GoodTx (..)
@@ -17,6 +18,7 @@ module Test.Pos.Core.Arbitrary.Txp
        , genTxInWitness
        , genTxOutDist
        , genTxPayload
+       , genGoodTxWithMagic
        ) where
 
 import           Universum
@@ -31,13 +33,14 @@ import           Test.QuickCheck.Arbitrary.Generic (genericArbitrary,
                      genericShrink)
 
 import           Pos.Binary.Class (Raw)
+import           Pos.Chain.Txp (Tx (..), TxAux (..), TxIn (..),
+                     TxInWitness (..), TxOut (..), TxOutAux (..),
+                     TxPayload (..), TxProof (..), TxSigData (..), mkTxPayload)
 import           Pos.Core.Attributes (mkAttributes)
 import           Pos.Core.Common (Coin, IsBootstrapEraAddr (..),
                      makePubKeyAddress)
 import           Pos.Core.Merkle (MerkleNode (..), MerkleRoot (..))
-import           Pos.Core.Txp (Tx (..), TxAux (..), TxIn (..), TxInWitness (..),
-                     TxOut (..), TxOutAux (..), TxPayload (..), TxProof (..),
-                     TxSigData (..), mkTxPayload)
+import           Pos.Core.NetworkMagic (makeNetworkMagic)
 import           Pos.Crypto (Hash, ProtocolMagic, SecretKey, SignTag (SignTx),
                      hash, sign, toPublic)
 
@@ -149,8 +152,9 @@ buildProperTx pm inputList (inCoin, outCoin) =
     outs = fmap (view _4) txList
     mkWitness fromSk =
         PkWitness (toPublic fromSk) (sign pm SignTx fromSk $ TxSigData newTxHash)
+    nm = makeNetworkMagic pm
     makeTxOutput s c =
-        TxOut (makePubKeyAddress (IsBootstrapEraAddr True) $ toPublic s) c
+        TxOut (makePubKeyAddress nm (IsBootstrapEraAddr True) $ toPublic s) c
 
 -- | Well-formed transaction 'Tx'.
 --
@@ -158,6 +162,12 @@ buildProperTx pm inputList (inCoin, outCoin) =
 newtype GoodTx = GoodTx
     { getGoodTx :: NonEmpty (Tx, TxIn, TxOutAux, TxInWitness)
     } deriving (Generic, Show)
+
+genGoodTxWithMagic :: ProtocolMagic -> Gen GoodTx
+genGoodTxWithMagic pm =
+        GoodTx <$> (buildProperTx pm
+                        <$> arbitrary
+                        <*> pure (identity, identity))
 
 goodTxToTxAux :: GoodTx -> TxAux
 goodTxToTxAux (GoodTx l) = TxAux tx witness

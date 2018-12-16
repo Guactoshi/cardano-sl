@@ -5,14 +5,81 @@
 
 ### Features
 
+- #### Reduce number of files on disk
+  Blund files (containing blocks and their undos) for older epochs (from zero up to current
+  epoch minus two) are now consolidated into epoch/index file pairs. That means that the number
+  of files to store the block chain for a single epoch is reduced from 21600 (one blund file for
+  each slot in an epoch) to an epoch/index file pair. Consolidation happens on-the-fly in a
+  background process.
+
+- #### Add bouncing and throttling to the API
+  Previously, exchanges could accidentally overload their wallet servers. We
+  have added configurable throttling to the API service to prevent this
+  problem. To configure this, setting, view the changes in the
+  `configuration.yaml` file under the `wallet` section. The API will now return
+  a 429 error containing the microseconds to wait until retry.
+
+- We can force an NTP-check when getting node-info via the API (`?force_ntp_check` query flag) (CO-325)
+
+- The API provides an endpoint to retrieve basic statistics on the UTxO distribution of a wallet
+  (`/api/v1/wallets/{walletId}/statistics`). (CO-325)
+
+- cardano-sl exposes a new package `x509` with tooling for defining a PKI infrastructure from
+  pure Haskell. This is basically an export of the internals of the tool `cardano-sl-x509-generate` (CO-387)
+
+
 ### Fixes
 
+- #### Make productionReporter more robust
+  Add exception handling code in reporting exception handler, to prevent IOExceptions from killing
+  the main thread. This was noticed when the network connection was interrupted, and the reporter
+  died when it tried to report over the down network. (CDEC-470 / [PR 3365])
+
+[PR 3365]: https://github.com/input-output-hk/cardano-sl/pull/3365
+
+- Improve type safety (and as a consequence, API documentation) of account indexes (CBR-306)
+
+- The Swagger specification had names with illegal characters. These names
+  where changed to be URL friendly. [PR #3595](https://github.com/input-output-hk/cardano-sl/pull/3595)
+
+- The creation of mnemonic doesn't throw anymore when provided words outside of the BIP39 English dictionnary.
+  Instead, it returns an error value gracefully (CO-325)
+
+- Response from `JSONValidationError` are now also encoded inline (instead of a pretty-encoding with newlines) (DDW-318)
+
+- **[API BREAKING CHANGE]** The behavior of `/api/v1/addresses/{address}` has been adjusted to reflect more accurately
+  the meaning of ownership regarding addresses.
+  The previous version of this endpoint failed with an HTTP error when the given address was unknown to the wallet.
+  This was misleading since an address that is unknown to the wallet may still belong to the wallet. To reflect this,
+  the V1 endpoint does not fail anymore as it used to when an address is not recognised and returns instead a new field
+  'is-ours' which indicates either that an address is ours, or that it is 'not-recognised'. (CBR-401)
+  
+ - **[API BREAKING CHANGE]** A DELETE request to `/api/v1/wallets/{wallet}` now correctly fails with 404 if the wallet doesn't exist. Previously it incorrectly responded with 204.
+
 ### Improvements
+
+- Friendly error mistakes from deserializing invalid addresses instead of brutal 500 (CBR-283)
+
+- **[API BREAKING CHANGE]** Add `walletId` to `WalletAlreadyExists` WalletLayerError (CBR-254)
+
+- Small refactor of wallet Errors implementation to be more maintainable (CBR-26)
+
+- Content-Type parser is now more lenient and accepts `application/json`, `application/json;charset=utf-8` and
+  no Content-Type at all (defaulting to `application/json`).
+
+- The codebase now relies on the package `cryptonite` (instead of `ed25519`) for Ed25519 implementation (CO-325)
+
+- **[API BREAKING CHANGE]** Improve diagnostic for `NotEnoughMoney` error (CBR-461)
+
+- When Content-Type's main MIME-type cannot fall back to 'application/json' then UnsupportedMimeTypeError is returned
 
 ### Specifications
 
 ### Documentation
 
+- Make an inventory of existing wallet errors and exceptions (CBR-307)
+
+- wallet-new README has been improved (especially on sections about testing) and updated (CO-325)
 
 ## Cardano SL 1.3.0
 

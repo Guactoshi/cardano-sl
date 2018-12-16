@@ -1,4 +1,5 @@
 {-# LANGUAGE ExistentialQuantification #-}
+{-# LANGUAGE RecordWildCards           #-}
 {-# LANGUAGE TypeFamilies              #-}
 
 -- | Specification of Pos.Client.Txp.Util
@@ -20,7 +21,9 @@ import           Test.QuickCheck (Discard (..), Gen, Testable, arbitrary,
                      choose)
 import           Test.QuickCheck.Monadic (forAllM, stop)
 
-import           Pos.Chain.Txp (Utxo)
+import           Pos.Chain.Txp (Tx (..), TxAux (..), TxId, TxIn (..),
+                     TxOut (..), TxOutAux (..), Utxo)
+import           Pos.Chain.Update (BlockVersionData (..))
 import           Pos.Client.Txp.Addresses (MonadAddresses (..))
 import           Pos.Client.Txp.Util (InputSelectionPolicy (..), TxError (..),
                      TxOutputs, TxWithSpendings, createMTx, createRedemptionTx,
@@ -28,19 +31,17 @@ import           Pos.Client.Txp.Util (InputSelectionPolicy (..), TxError (..),
 import           Pos.Core (Address, Coeff (..), TxFeePolicy (..),
                      TxSizeLinear (..), makePubKeyAddressBoot,
                      makeRedeemAddress, unsafeIntegerToCoin)
-import           Pos.Core.Txp (Tx (..), TxAux (..), TxId, TxIn (..), TxOut (..),
-                     TxOutAux (..))
-import           Pos.Core.Update (BlockVersionData (..))
-import           Pos.Crypto (RedeemSecretKey, SafeSigner, SecretKey, decodeHash,
-                     fakeSigner, redeemToPublic, toPublic)
+import           Pos.Core.NetworkMagic (NetworkMagic (..), makeNetworkMagic)
+import           Pos.Crypto (ProtocolMagic (..), RedeemSecretKey, SafeSigner,
+                     SecretKey, decodeHash, fakeSigner, redeemToPublic,
+                     toPublic)
 import           Pos.DB (gsAdoptedBVData)
 import           Pos.Util.Util (leftToPanic)
 
-import           Test.Pos.Client.Txp.Mode (HasTxpConfigurations, TxpTestMode,
-                     TxpTestProperty, withBVData)
-import           Test.Pos.Configuration (withDefConfigurations)
+import           Test.Pos.Client.Txp.Mode (TxpTestMode, TxpTestProperty,
+                     withBVData)
+import           Test.Pos.Configuration (withProvidedMagicConfig)
 import           Test.Pos.Crypto.Arbitrary ()
-import           Test.Pos.Crypto.Dummy (dummyProtocolMagic)
 import           Test.Pos.Util.QuickCheck.Arbitrary (nonrepeating)
 import           Test.Pos.Util.QuickCheck.Property (stopProperty)
 
@@ -49,7 +50,7 @@ import           Test.Pos.Util.QuickCheck.Property (stopProperty)
 ----------------------------------------------------------------------------
 
 spec :: Spec
-spec = withDefConfigurations $ \_ _ _ ->
+spec =
     describe "Client.Txp.Util" $ do
         describe "createMTx" $ createMTxSpec
 
@@ -58,7 +59,7 @@ spec = withDefConfigurations $ \_ _ _ ->
 data TestFunctionWrapper
     = forall prop. (Testable prop) => TestFunctionWrapper (InputSelectionPolicy -> prop)
 
-createMTxSpec :: HasTxpConfigurations => Spec
+createMTxSpec :: Spec
 createMTxSpec = do
     let inputSelectionPolicies =
             [ ("Grouped inputs", OptimizeForSecurity)
@@ -113,16 +114,15 @@ createMTxSpec = do
         "The amount of used inputs is as small as possible"
 
 testCreateMTx
-    :: HasTxpConfigurations
-    => CreateMTxParams
+    :: CreateMTxParams
     -> TxpTestProperty (Either TxError (TxAux, NonEmpty TxOut))
-testCreateMTx CreateMTxParams{..} = lift $
-    createMTx dummyProtocolMagic mempty cmpInputSelectionPolicy cmpUtxo (getSignerFromList cmpSigners)
-    cmpOutputs cmpAddrData
+testCreateMTx CreateMTxParams {..} = lift $
+    withProvidedMagicConfig cmpProtocolMagic $ \genesisConfig _ _ ->
+        createMTx genesisConfig mempty cmpInputSelectionPolicy cmpUtxo (getSignerFromList cmpSigners)
+        cmpOutputs cmpAddrData
 
 createMTxWorksWhenWeAreRichSpec
-    :: HasTxpConfigurations
-    => InputSelectionPolicy
+    :: InputSelectionPolicy
     -> TxpTestProperty ()
 createMTxWorksWhenWeAreRichSpec inputSelectionPolicy =
     forAllM gen $ \txParams@CreateMTxParams{..} -> do
@@ -134,8 +134,7 @@ createMTxWorksWhenWeAreRichSpec inputSelectionPolicy =
     gen = makeManyAddressesToManyParams inputSelectionPolicy 1 1000000 1 1
 
 stabilizationDoesNotFailSpec
-    :: HasTxpConfigurations
-    => InputSelectionPolicy
+    :: InputSelectionPolicy
     -> TxpTestProperty ()
 stabilizationDoesNotFailSpec inputSelectionPolicy = do
     forAllM gen $ \txParams@CreateMTxParams{..} -> do
@@ -148,8 +147,7 @@ stabilizationDoesNotFailSpec inputSelectionPolicy = do
     gen = makeManyAddressesToManyParams inputSelectionPolicy 1 200000 1 1
 
 feeIsNonzeroSpec
-    :: HasTxpConfigurations
-    => InputSelectionPolicy
+    :: InputSelectionPolicy
     -> TxpTestProperty ()
 feeIsNonzeroSpec inputSelectionPolicy = do
     forAllM gen $ \txParams@CreateMTxParams{..} -> do
@@ -164,8 +162,7 @@ feeIsNonzeroSpec inputSelectionPolicy = do
     gen = makeManyAddressesToManyParams inputSelectionPolicy 1 100000 1 1
 
 manyUtxoTo1Spec
-    :: HasTxpConfigurations
-    => InputSelectionPolicy
+    :: InputSelectionPolicy
     -> TxpTestProperty ()
 manyUtxoTo1Spec inputSelectionPolicy = do
     forAllM gen $ \txParams@CreateMTxParams{..} -> do
@@ -177,8 +174,7 @@ manyUtxoTo1Spec inputSelectionPolicy = do
     gen = makeManyUtxoTo1Params inputSelectionPolicy 10 100000 1
 
 manyAddressesTo1Spec
-    :: HasTxpConfigurations
-    => InputSelectionPolicy
+    :: InputSelectionPolicy
     -> TxpTestProperty ()
 manyAddressesTo1Spec inputSelectionPolicy = do
     forAllM gen $ \txParams@CreateMTxParams{..} -> do
@@ -190,8 +186,7 @@ manyAddressesTo1Spec inputSelectionPolicy = do
     gen = makeManyAddressesToManyParams inputSelectionPolicy 10 100000 1 1
 
 manyAddressesToManySpec
-    :: HasTxpConfigurations
-    => InputSelectionPolicy
+    :: InputSelectionPolicy
     -> TxpTestProperty ()
 manyAddressesToManySpec inputSelectionPolicy = do
     forAllM gen $ \txParams@CreateMTxParams{..} -> do
@@ -202,10 +197,10 @@ manyAddressesToManySpec inputSelectionPolicy = do
   where
     gen = makeManyAddressesToManyParams inputSelectionPolicy 10 100000 10 1
 
-redemptionSpec :: HasTxpConfigurations => TxpTestProperty ()
+redemptionSpec :: TxpTestProperty ()
 redemptionSpec = do
     forAllM genParams $ \(CreateRedemptionTxParams {..}) -> do
-        txOrError <- createRedemptionTx dummyProtocolMagic crpUtxo crpRsk crpOutputs
+        txOrError <- createRedemptionTx crpProtocolMagic crpUtxo crpRsk crpOutputs
         case txOrError of
             Left err -> stopProperty $ pretty err
             Right _  -> return ()
@@ -213,38 +208,40 @@ redemptionSpec = do
     genParams = do
         crpRsk <- arbitrary
         skTo   <- arbitrary
+        crpProtocolMagic <- arbitrary
 
-        let txOutAuxInput = generateRedeemTxOutAux 1 crpRsk
-            txOutAuxOutput = generateTxOutAux 1 skTo
+        let nm = makeNetworkMagic crpProtocolMagic
+            txOutAuxInput = generateRedeemTxOutAux nm 1 crpRsk
+            txOutAuxOutput = generateTxOutAux nm 1 skTo
             crpUtxo = one (TxInUtxo (unsafeIntegerToTxId 0) 0, txOutAuxInput)
             crpOutputs = one txOutAuxOutput
 
         pure CreateRedemptionTxParams {..}
 
 txWithRedeemOutputFailsSpec
-    :: HasTxpConfigurations
-    => InputSelectionPolicy
+    :: InputSelectionPolicy
     -> TxpTestProperty ()
 txWithRedeemOutputFailsSpec inputSelectionPolicy = do
-    forAllM genParams $ \(CreateMTxParams {..}) -> do
-        txOrError <-
-            createMTx dummyProtocolMagic mempty cmpInputSelectionPolicy cmpUtxo
-                      (getSignerFromList cmpSigners)
-                      cmpOutputs cmpAddrData
-        case txOrError of
-            Left (OutputIsRedeem _) -> return ()
-            Left err -> stopProperty $ pretty err
-            Right _  -> stopProperty $
-                sformat ("Transaction to a redeem address was created")
+    forAllM genParams $ \(CreateMTxParams {..}) ->
+        withProvidedMagicConfig cmpProtocolMagic $ \genesisConfig _ _ -> do
+            txOrError <-
+                createMTx genesisConfig mempty cmpInputSelectionPolicy cmpUtxo
+                        (getSignerFromList cmpSigners)
+                        cmpOutputs cmpAddrData
+            case txOrError of
+                Left (OutputIsRedeem _) -> return ()
+                Left err -> stopProperty $ pretty err
+                Right _  -> stopProperty $
+                    sformat ("Transaction to a redeem address was created")
   where
     genParams = do
-        txOutAuxOutput <- generateRedeemTxOutAux 1 <$> arbitrary
         params <- makeManyAddressesToManyParams inputSelectionPolicy 1 1000000 1 1
+        let nm = makeNetworkMagic (cmpProtocolMagic params)
+        txOutAuxOutput <- generateRedeemTxOutAux nm 1 <$> arbitrary
         pure params{ cmpOutputs = one txOutAuxOutput }
 
 feeForManyAddressesSpec
-    :: HasTxpConfigurations
-    => InputSelectionPolicy
+    :: InputSelectionPolicy
     -> Bool
     -> TxpTestProperty ()
 feeForManyAddressesSpec inputSelectionPolicy manyAddrs =
@@ -287,7 +284,7 @@ feeForManyAddressesSpec inputSelectionPolicy manyAddrs =
         | otherwise = makeManyUtxoTo1Params inputSelectionPolicy
 
 
-groupedPolicySpec :: HasTxpConfigurations => TxpTestProperty ()
+groupedPolicySpec :: TxpTestProperty ()
 groupedPolicySpec =
     forAllM gen $ testCreateMTx >=> \case
         Left err -> stopProperty $ pretty err
@@ -299,7 +296,7 @@ groupedPolicySpec =
     utxoNum = 10
     gen = makeManyUtxoTo1Params OptimizeForSecurity (fromIntegral utxoNum) 1000000 1
 
-ungroupedPolicySpec :: HasTxpConfigurations => TxpTestProperty ()
+ungroupedPolicySpec :: TxpTestProperty ()
 ungroupedPolicySpec =
     forAllM gen $ testCreateMTx >=> \case
         Left err -> stopProperty $ pretty err
@@ -327,14 +324,16 @@ data CreateMTxParams = CreateMTxParams
     , cmpAddrData             :: !(AddrData TxpTestMode)
     -- ^ Data that is normally used for creation of change addresses.
     -- In tests, it is always `()`.
+    , cmpProtocolMagic        :: !ProtocolMagic
     } deriving Show
 
 -- | Container for parameters of `createRedemptionTx`.
 -- The parameters mirror those of `createMTx` almost perfectly.
 data CreateRedemptionTxParams = CreateRedemptionTxParams
-    { crpUtxo    :: !Utxo
-    , crpRsk     :: !RedeemSecretKey
-    , crpOutputs :: !TxOutputs
+    { crpUtxo          :: !Utxo
+    , crpRsk           :: !RedeemSecretKey
+    , crpOutputs       :: !TxOutputs
+    , crpProtocolMagic :: !ProtocolMagic
     } deriving Show
 
 getSignerFromList :: NonEmpty (SafeSigner, Address) -> Address -> Maybe SafeSigner
@@ -344,13 +343,15 @@ getSignerFromList (HM.fromList . map swap . toList -> hm) =
 makeManyUtxoTo1Params :: InputSelectionPolicy -> Int -> Integer -> Integer -> Gen CreateMTxParams
 makeManyUtxoTo1Params inputSelectionPolicy numFrom amountEachFrom amountTo = do
     ~[skFrom, skTo] <- nonrepeating 2
-    let txOutAuxInput  = generateTxOutAux amountEachFrom skFrom
-        txOutAuxOutput = generateTxOutAux amountTo skTo
+    cmpProtocolMagic <- arbitrary
+    let nm = makeNetworkMagic cmpProtocolMagic
+    let txOutAuxInput  = generateTxOutAux nm amountEachFrom skFrom
+        txOutAuxOutput = generateTxOutAux nm amountTo skTo
         cmpInputSelectionPolicy = inputSelectionPolicy
         cmpUtxo = M.fromList
             [(TxInUtxo (unsafeIntegerToTxId 0) (fromIntegral k), txOutAuxInput) |
                 k <- [0..numFrom-1]]
-        cmpSigners = one $ makeSigner skFrom
+        cmpSigners = one $ makeSigner nm skFrom
         cmpOutputs = one txOutAuxOutput
         cmpAddrData = ()
 
@@ -365,12 +366,14 @@ makeManyAddressesToManyParams
     -> Gen CreateMTxParams
 makeManyAddressesToManyParams inputSelectionPolicy numFrom amountEachFrom numTo amountEachTo = do
     sks <- nonrepeating (numFrom + numTo)
+    cmpProtocolMagic <- arbitrary
+    let nm = makeNetworkMagic cmpProtocolMagic
 
     let (sksFrom, sksTo) = splitAt numFrom sks
-        cmpSignersList = map makeSigner sksFrom
+        cmpSignersList = map (makeSigner nm) sksFrom
         cmpSigners = NE.fromList cmpSignersList
-        txOutAuxInputs = map (generateTxOutAux amountEachFrom) sksFrom
-        txOutAuxOutputs = map (generateTxOutAux amountEachTo) sksTo
+        txOutAuxInputs = map (generateTxOutAux nm amountEachFrom) sksFrom
+        txOutAuxOutputs = map (generateTxOutAux nm amountEachTo) sksTo
         cmpInputSelectionPolicy = inputSelectionPolicy
         cmpUtxo = M.fromList
             [(TxInUtxo (unsafeIntegerToTxId $ fromIntegral k) 0, txOutAux) |
@@ -408,19 +411,19 @@ makeTxOutAux amount addr =
         txOut = TxOut addr coin
     in TxOutAux txOut
 
-generateTxOutAux :: Integer -> SecretKey -> TxOutAux
-generateTxOutAux amount sk =
-    makeTxOutAux amount (secretKeyToAddress sk)
+generateTxOutAux :: NetworkMagic -> Integer -> SecretKey -> TxOutAux
+generateTxOutAux nm amount sk =
+    makeTxOutAux amount (secretKeyToAddress nm sk)
 
-generateRedeemTxOutAux :: Integer -> RedeemSecretKey -> TxOutAux
-generateRedeemTxOutAux amount rsk =
-    makeTxOutAux amount (makeRedeemAddress $ redeemToPublic rsk)
+generateRedeemTxOutAux :: NetworkMagic -> Integer -> RedeemSecretKey -> TxOutAux
+generateRedeemTxOutAux nm amount rsk =
+    makeTxOutAux amount (makeRedeemAddress nm $ redeemToPublic rsk)
 
-secretKeyToAddress :: SecretKey -> Address
-secretKeyToAddress = makePubKeyAddressBoot . toPublic
+secretKeyToAddress :: NetworkMagic -> SecretKey -> Address
+secretKeyToAddress nm = makePubKeyAddressBoot nm . toPublic
 
-makeSigner :: SecretKey -> (SafeSigner, Address)
-makeSigner sk = (fakeSigner sk, secretKeyToAddress sk)
+makeSigner :: NetworkMagic -> SecretKey -> (SafeSigner, Address)
+makeSigner nm sk = (fakeSigner sk, secretKeyToAddress nm sk)
 
 withTxFeePolicy
   :: Coeff -> Coeff -> TxpTestProperty () -> TxpTestProperty ()

@@ -1,5 +1,6 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE RankNTypes          #-}
+{-# LANGUAGE RecordWildCards     #-}
 
 -- | High level workers.
 
@@ -11,9 +12,9 @@ import           Universum
 
 import           Pos.Worker.Block (blkWorkers)
 -- Message instances.
+import           Pos.Chain.Genesis as Genesis (Config, configEpochSlots)
 import           Pos.Chain.Txp (TxpConfiguration)
 import           Pos.Context (NodeContext (..))
-import           Pos.Crypto (ProtocolMagic)
 import           Pos.Infra.Diffusion.Types (Diffusion)
 import           Pos.Infra.Network.CLI (launchStaticConfigMonitoring)
 import           Pos.Infra.Network.Types (NetworkConfig (..))
@@ -27,19 +28,20 @@ import           Pos.WorkMode (WorkMode)
 -- | All, but in reality not all, workers used by full node.
 allWorkers
     :: forall ext ctx m . WorkMode ctx m
-    => ProtocolMagic
+    => Genesis.Config
     -> TxpConfiguration
     -> NodeResources ext
-    -> [Diffusion m -> m ()]
-allWorkers pm txpConfig NodeResources {..} = mconcat
-    [ sscWorkers pm
-    , usWorkers
-    , blkWorkers pm txpConfig
+    -> [ (Text, Diffusion m -> m ()) ]
+allWorkers genesisConfig txpConfig NodeResources {..} = mconcat
+    [ sscWorkers genesisConfig
+    , usWorkers genesisConfig
+    , blkWorkers genesisConfig txpConfig
     , dlgWorkers
-    , [properSlottingWorker, staticConfigMonitoringWorker]
+    , [ ("proper slotting", properSlottingWorker), ("static config", staticConfigMonitoringWorker) ]
     ]
   where
     topology = ncTopology ncNetworkConfig
     NodeContext {..} = nrContext
-    properSlottingWorker = const logNewSlotWorker
+    properSlottingWorker =
+        const $ logNewSlotWorker $ configEpochSlots genesisConfig
     staticConfigMonitoringWorker = const (launchStaticConfigMonitoring topology)

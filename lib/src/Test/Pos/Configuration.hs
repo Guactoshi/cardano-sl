@@ -8,6 +8,7 @@ module Test.Pos.Configuration
 
        , HasStaticConfigurations
        , withDefConfiguration
+       , withProvidedMagicConfig
        , withDefNtpConfiguration
        , withDefNodeConfiguration
        , withDefSscConfiguration
@@ -30,16 +31,14 @@ import           Ntp.Client (NtpConfiguration)
 import           Pos.Chain.Block (HasBlockConfiguration, withBlockConfiguration)
 import           Pos.Chain.Delegation (HasDlgConfiguration,
                      withDlgConfiguration)
+import           Pos.Chain.Genesis as Genesis (Config (..),
+                     GenesisProtocolConstants (..), GenesisSpec (..),
+                     StaticConfig (..), mkConfig)
 import           Pos.Chain.Ssc (HasSscConfiguration, withSscConfiguration)
 import           Pos.Chain.Txp (TxpConfiguration (..))
-import           Pos.Chain.Update (HasUpdateConfiguration,
+import           Pos.Chain.Update (BlockVersionData, HasUpdateConfiguration,
                      withUpdateConfiguration)
 import           Pos.Configuration (HasNodeConfiguration, withNodeConfiguration)
-import           Pos.Core (HasConfiguration, withGenesisSpec)
-import           Pos.Core.Configuration (CoreConfiguration (..),
-                     GenesisConfiguration (..))
-import           Pos.Core.Genesis (GenesisSpec (..))
-import           Pos.Core.Update (BlockVersionData)
 import           Pos.Crypto (ProtocolMagic)
 import           Pos.Launcher.Configuration (Configuration (..),
                      HasConfigurations)
@@ -55,10 +54,9 @@ defaultTestConf = case J.fromJSON $ J.Object jobj of
     jobj = $(embedYamlConfigCT (Proxy @J.Object) "configuration.yaml" "configuration.yaml" "test")
 
 defaultTestGenesisSpec :: GenesisSpec
-defaultTestGenesisSpec =
-    case ccGenesis (ccCore defaultTestConf) of
-        GCSpec spec -> spec
-        _           -> error "unexpected genesis type in test"
+defaultTestGenesisSpec = case ccGenesis defaultTestConf of
+    GCSpec spec -> spec
+    _           -> error "unexpected genesis type in test"
 
 defaultTestBlockVersionData :: BlockVersionData
 defaultTestBlockVersionData = gsBlockVersionData defaultTestGenesisSpec
@@ -91,8 +89,8 @@ withDefBlockConfiguration = withBlockConfiguration (ccBlock defaultTestConf)
 withDefDlgConfiguration :: (HasDlgConfiguration => r) -> r
 withDefDlgConfiguration = withDlgConfiguration (ccDlg defaultTestConf)
 
-withDefConfiguration :: (HasConfiguration => ProtocolMagic -> r) -> r
-withDefConfiguration = withGenesisSpec 0 (ccCore defaultTestConf) id
+withDefConfiguration :: (Genesis.Config -> r) -> r
+withDefConfiguration f = f $ mkConfig 0 defaultTestGenesisSpec
 
 withStaticConfigurations :: (HasStaticConfigurations => TxpConfiguration -> NtpConfiguration -> r) -> r
 withStaticConfigurations patak =
@@ -104,6 +102,35 @@ withStaticConfigurations patak =
     withDefNtpConfiguration (patak $ TxpConfiguration 200 Set.empty)
 
 withDefConfigurations
-    :: (HasConfigurations => ProtocolMagic -> TxpConfiguration -> NtpConfiguration -> r) -> r
-withDefConfigurations bardaq =
-    withDefConfiguration $ \pm -> withStaticConfigurations (bardaq pm)
+    :: (  HasConfigurations
+       => Genesis.Config
+       -> TxpConfiguration
+       -> NtpConfiguration
+       -> r
+       )
+    -> r
+withDefConfigurations bardaq = withDefConfiguration
+    $ \genesisConfig -> withStaticConfigurations (bardaq genesisConfig)
+
+withProvidedMagicConfig
+    :: ProtocolMagic
+    -> (  HasConfigurations
+       => Genesis.Config
+       -> TxpConfiguration
+       -> NtpConfiguration
+       -> r
+       )
+    -> r
+withProvidedMagicConfig pm f = withStaticConfigurations (f overriddenGenesisConfig)
+  where
+    overriddenGenesisConfig :: Genesis.Config
+    overriddenGenesisConfig = mkConfig 0 overriddenGenesisSpec
+    --
+    overriddenGenesisSpec :: GenesisSpec
+    overriddenGenesisSpec = updateGS defaultTestGenesisSpec
+    --
+    updateGS :: GenesisSpec -> GenesisSpec
+    updateGS gs = gs { gsProtocolConstants = updateGPC (gsProtocolConstants gs) }
+    --
+    updateGPC :: GenesisProtocolConstants -> GenesisProtocolConstants
+    updateGPC gpc = gpc { gpcProtocolMagic = pm }

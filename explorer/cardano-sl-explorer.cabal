@@ -1,5 +1,5 @@
 name:                cardano-sl-explorer
-version:             1.3.0
+version:             2.0.0
 synopsis:            Cardano explorer
 description:         Please see README.md
 license:             MIT
@@ -62,14 +62,12 @@ library
                       , formatting
                       , free
                       , lens
-                      , log-warper
                       , memory
                       , mmorph
                       , resourcet
                       , rocksdb-haskell-ng
                       , safe-exceptions
                       , serokell-util
-                      , servant-generic
                       , stm
                       , text
                       , formatting
@@ -92,7 +90,6 @@ library
                       , cardano-sl-db
                       , cardano-sl-generator
                       , cardano-sl-infra
-                      , cardano-sl-networking
                       , cardano-sl-util
 
                       -- mtl ++
@@ -127,7 +124,6 @@ library
                         DefaultSignatures
                         NoImplicitPrelude
                         OverloadedStrings
-                        RecordWildCards
                         TemplateHaskell
                         TypeApplications
                         TupleSections
@@ -157,12 +153,9 @@ executable cardano-explorer
                      , cardano-sl
                      , cardano-sl-chain
                      , cardano-sl-core
-                     , cardano-sl-crypto
                      , cardano-sl-infra
                      , cardano-sl-explorer
-                     , cardano-sl-networking
                      , cardano-sl-util
-                     , log-warper
                      , optparse-applicative
                      , universum
   default-language:    Haskell2010
@@ -182,7 +175,6 @@ executable cardano-explorer
                         DefaultSignatures
                         NoImplicitPrelude
                         OverloadedStrings
-                        RecordWildCards
                         TypeApplications
                         TupleSections
                         ViewPatterns
@@ -226,7 +218,6 @@ executable cardano-explorer-hs2purs
                         DefaultSignatures
                         NoImplicitPrelude
                         OverloadedStrings
-                        RecordWildCards
                         TypeApplications
                         TupleSections
                         ViewPatterns
@@ -301,7 +292,6 @@ executable cardano-explorer-mock
                         DefaultSignatures
                         NoImplicitPrelude
                         OverloadedStrings
-                        RecordWildCards
                         TypeApplications
                         TupleSections
                         ViewPatterns
@@ -355,9 +345,10 @@ test-suite cardano-explorer-test
                      , generic-arbitrary
                      , hspec
                      , lens
-                     , log-warper
                      , universum >= 0.1.11
                      , warp
+  build-tool-depends: hspec-discover:hspec-discover
+
   hs-source-dirs:      test
   default-language:    Haskell2010
   ghc-options:         -threaded
@@ -380,7 +371,6 @@ test-suite cardano-explorer-test
                         DefaultSignatures
                         NoImplicitPrelude
                         OverloadedStrings
-                        RecordWildCards
                         TypeApplications
                         TupleSections
                         ViewPatterns
@@ -404,7 +394,7 @@ benchmark cardano-explorer-bench
   build-depends:       QuickCheck
                      , base
                      , cardano-sl
-                     , cardano-sl-core-test
+                     , cardano-sl-chain-test
                      , cardano-sl-explorer
                      , criterion
                      , universum >= 0.1.11
@@ -430,7 +420,6 @@ benchmark cardano-explorer-bench
                         DefaultSignatures
                         NoImplicitPrelude
                         OverloadedStrings
-                        RecordWildCards
                         TypeApplications
                         TupleSections
                         ViewPatterns

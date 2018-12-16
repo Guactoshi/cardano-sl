@@ -2,6 +2,7 @@
 {-# LANGUAGE InstanceSigs          #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE NamedFieldPuns        #-}
+{-# LANGUAGE RecordWildCards       #-}
 {-# LANGUAGE ScopedTypeVariables   #-}
 {-# LANGUAGE TypeFamilies          #-}
 {-# LANGUAGE UndecidableInstances  #-}
@@ -19,9 +20,9 @@ import qualified Data.Set as Set
 import           Data.String (fromString)
 import           Data.Text (Text)
 import           Formatting (sformat, shown, (%))
-import           System.Wlog
 
 import           Pos.Util.Trace (wlogTrace)
+import           Pos.Util.Wlog
 
 import           Network.Broadcast.OutboundQueue (OutboundQ)
 import qualified Network.Broadcast.OutboundQueue as OutQ
@@ -43,8 +44,6 @@ runEnqueue = id
 
 relayDemo :: IO ()
 relayDemo = do
-    updateGlobalLogger "*production*" (setLevel noticePlus)
-
     let block :: Text -> [Node] -> Enqueue () -> Enqueue ()
         block label nodes act = do
           usingLoggerName (fromString "outboundqueue-production") $ logNotice label

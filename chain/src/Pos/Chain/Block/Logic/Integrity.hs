@@ -1,4 +1,5 @@
-{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE TypeFamilies    #-}
 
 -- | Verification of headers and blocks, also chain integrity
 -- checks. Almost pure (requires leaders to be explicitly passed).
@@ -25,21 +26,25 @@ import           Serokell.Data.Memory.Units (Byte, memory)
 import           Serokell.Util (VerificationRes (..), verifyGeneric)
 
 import qualified Pos.Binary.Class as Bi
-import qualified Pos.Chain.Block.BHelpers as BHelpers
+import           Pos.Chain.Block.Block (Block, gbExtra, genBlockLeaders,
+                     getBlockHeader, verifyBlockInternal)
+import           Pos.Chain.Block.Genesis (gebAttributes, gehAttributes)
+import           Pos.Chain.Block.HasPrevBlock (prevBlockL)
+import           Pos.Chain.Block.Header (BlockHeader (..), HasHeaderHash (..),
+                     HeaderHash, blockHeaderProtocolMagicId, gbhExtra,
+                     mainHeaderLeaderKey, verifyBlockHeader)
+import           Pos.Chain.Block.IsHeader (headerSlotL)
+import           Pos.Chain.Block.Main (mebAttributes, mehAttributes)
+import           Pos.Chain.Genesis as Genesis (Config (..))
+import           Pos.Chain.Update (BlockVersionData (..))
 import           Pos.Core (ChainDifficulty, EpochOrSlot, HasDifficulty (..),
-                     HasEpochIndex (..), HasEpochOrSlot (..),
-                     HasProtocolConstants, SlotId (..), SlotLeaders,
-                     addressHash, getSlotIndex)
+                     HasEpochIndex (..), HasEpochOrSlot (..), SlotId (..),
+                     SlotLeaders, addressHash, getSlotIndex)
 import           Pos.Core.Attributes (areAttributesKnown)
-import           Pos.Core.Block (Block, BlockHeader (..), HasHeaderHash (..),
-                     HeaderHash, blockHeaderProtocolMagic, gbExtra, gbhExtra,
-                     gebAttributes, gehAttributes, genBlockLeaders,
-                     getBlockHeader, headerSlotL, mainHeaderLeaderKey,
-                     mebAttributes, mehAttributes, prevBlockL)
 import           Pos.Core.Chrono (NewestFirst (..), OldestFirst)
 import           Pos.Core.Slotting (EpochIndex)
-import           Pos.Core.Update (BlockVersionData (..))
-import           Pos.Crypto (ProtocolMagic (..))
+import           Pos.Crypto (ProtocolMagic (..), ProtocolMagicId (..),
+                     getProtocolMagic)
 
 ----------------------------------------------------------------------------
 -- Header
@@ -91,12 +96,12 @@ verifyFromEither txt (Right _)     = verifyGeneric [(True, txt)]
 verifyHeader
     :: ProtocolMagic -> VerifyHeaderParams -> BlockHeader -> VerificationRes
 verifyHeader pm VerifyHeaderParams {..} h =
-       verifyFromEither "internal header consistency" (BHelpers.verifyBlockHeader pm h)
+       verifyFromEither "internal header consistency" (verifyBlockHeader pm h)
     <> verifyGeneric checks
   where
     checks =
         mconcat
-            [ checkProtocolMagic
+            [ checkProtocolMagicId
             , maybe mempty relatedToPrevHeader vhpPrevHeader
             , maybe mempty relatedToCurrentSlot vhpCurrentSlot
             , maybe mempty relatedToLeaders vhpLeaders
@@ -131,11 +136,11 @@ verifyHeader pm VerifyHeaderParams {..} h =
               ("two adjacent blocks are from different epochs ("%build%" != "%build%")")
               oldEpoch newEpoch
         )
-    checkProtocolMagic =
-        [ ( pm == blockHeaderProtocolMagic h
+    checkProtocolMagicId =
+        [ ( getProtocolMagicId pm == blockHeaderProtocolMagicId h
           , sformat
                 ("protocol magic number mismatch: got "%int%" but expected "%int)
-                (getProtocolMagic (blockHeaderProtocolMagic h))
+                (unProtocolMagicId (blockHeaderProtocolMagicId h))
                 (getProtocolMagic pm)
           )
         ]
@@ -263,14 +268,16 @@ instance NFData VerifyBlockParams
 -- 2.  The size of each block does not exceed `bvdMaxBlockSize`.
 -- 3.  (Optional) No block has any unknown attributes.
 verifyBlock
-    :: HasProtocolConstants
-    => ProtocolMagic
+    :: Genesis.Config
     -> VerifyBlockParams
     -> Block
     -> VerificationRes
-verifyBlock pm VerifyBlockParams {..} blk = mconcat
-    [ verifyFromEither "internal block consistency" (BHelpers.verifyBlock pm blk)
-    , verifyHeader pm vbpVerifyHeader (getBlockHeader blk)
+verifyBlock genesisConfig VerifyBlockParams {..} blk = mconcat
+    [ verifyFromEither "internal block consistency"
+                       (verifyBlockInternal genesisConfig blk)
+    , verifyHeader (configProtocolMagic genesisConfig)
+                   vbpVerifyHeader
+                   (getBlockHeader blk)
     , checkSize vbpMaxSize
     , bool mempty (verifyNoUnknown blk) vbpVerifyNoUnknown
     ]
@@ -312,15 +319,14 @@ type VerifyBlocksIter = (SlotLeaders, Maybe BlockHeader, VerificationRes)
 -- laziness of 'VerificationRes' which is good because laziness for this data
 -- type is crucial.
 verifyBlocks
-    :: HasProtocolConstants
-    => ProtocolMagic
+    :: Genesis.Config
     -> Maybe SlotId
     -> Bool
     -> BlockVersionData
     -> SlotLeaders
     -> OldestFirst [] Block
     -> VerificationRes
-verifyBlocks pm curSlotId verifyNoUnknown bvd initLeaders = view _3 . foldl' step start
+verifyBlocks genesisConfig curSlotId verifyNoUnknown bvd initLeaders = view _3 . foldl' step start
   where
     start :: VerifyBlocksIter
     -- Note that here we never know previous header before this
@@ -335,6 +341,9 @@ verifyBlocks pm curSlotId verifyNoUnknown bvd initLeaders = view _3 . foldl' ste
         let newLeaders = case blk of
                 Left genesisBlock -> genesisBlock ^. genBlockLeaders
                 Right _           -> leaders
+            blockMaxSize = case blk of
+                Left _  -> 2000000
+                Right _ -> bvdMaxBlockSize bvd
             vhp =
                 VerifyHeaderParams
                 { vhpPrevHeader = prevHeader
@@ -346,7 +355,7 @@ verifyBlocks pm curSlotId verifyNoUnknown bvd initLeaders = view _3 . foldl' ste
             vbp =
                 VerifyBlockParams
                 { vbpVerifyHeader = vhp
-                , vbpMaxSize = bvdMaxBlockSize bvd
+                , vbpMaxSize = blockMaxSize
                 , vbpVerifyNoUnknown = verifyNoUnknown
                 }
-        in (newLeaders, Just $ getBlockHeader blk, res <> verifyBlock pm vbp blk)
+        in (newLeaders, Just $ getBlockHeader blk, res <> verifyBlock genesisConfig vbp blk)

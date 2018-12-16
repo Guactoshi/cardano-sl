@@ -1,4 +1,5 @@
-{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE RankNTypes      #-}
+{-# LANGUAGE RecordWildCards #-}
 
 -- | Logic related to downloading update.
 
@@ -24,20 +25,20 @@ import           Network.HTTP.Simple (getResponseBody, getResponseStatus,
 import qualified Serokell.Util.Base16 as B16
 import           Serokell.Util.Text (listJsonIndent, mapJson)
 import           System.Directory (doesFileExist)
-import           System.Wlog (WithLogger, logDebug, logInfo, logWarning)
 
 import           Pos.Binary.Class (Raw)
 import           Pos.Chain.Update (ConfirmedProposalState (..),
-                     UpdateParams (..), curSoftwareVersion, ourSystemTag)
+                     SoftwareVersion (..), UpdateConfiguration,
+                     UpdateData (..), UpdateParams (..), UpdateProposal (..),
+                     curSoftwareVersion, ourSystemTag)
 import           Pos.Core.Exception (reportFatalError)
-import           Pos.Core.Update (SoftwareVersion (..), UpdateData (..),
-                     UpdateProposal (..))
 import           Pos.Crypto (Hash, castHash, hash)
 import           Pos.DB.Update (UpdateContext (..), isUpdateInstalled)
 import           Pos.Infra.Reporting (reportOrLogW)
 import           Pos.Listener.Update (UpdateMode)
 import           Pos.Util.Concurrent (withMVar)
 import           Pos.Util.Util (HasLens (..), (<//>))
+import           Pos.Util.Wlog (WithLogger, logDebug, logInfo, logWarning)
 
 -- | Compute hash of installer, this is hash is 'udPkgHash' from 'UpdateData'.
 --
@@ -92,10 +93,10 @@ downloadUpdate cps = do
 getUpdateHash :: UpdateMode ctx m => ConfirmedProposalState -> m (Hash Raw)
 getUpdateHash ConfirmedProposalState{..} = do
     useInstaller <- views (lensOf @UpdateParams) upUpdateWithPkg
-
+    uc <- view (lensOf @UpdateConfiguration)
     let data_ = upData cpsUpdateProposal
         dataHash = if useInstaller then udPkgHash else udAppDiffHash
-        mupdHash = dataHash <$> HM.lookup ourSystemTag data_
+        mupdHash = dataHash <$> HM.lookup (ourSystemTag uc) data_
 
     logDebug $ sformat ("Proposal's upData: "%mapJson) data_
 
@@ -111,6 +112,7 @@ getUpdateHash ConfirmedProposalState{..} = do
 downloadUpdateDo :: UpdateMode ctx m => Hash Raw -> ConfirmedProposalState -> m ()
 downloadUpdateDo updHash cps@ConfirmedProposalState {..} = do
     updateServers <- views (lensOf @UpdateParams) upUpdateServers
+    uc <- view (lensOf @UpdateConfiguration)
 
     logInfo $ sformat ("We are going to start downloading an update for "%build)
               cpsUpdateProposal
@@ -120,7 +122,7 @@ downloadUpdateDo updHash cps@ConfirmedProposalState {..} = do
         -- outside logic. We take only updates for our software and
         -- explicitly request only new updates. This invariant must be
         -- ensure by the caller of 'downloadUpdate'.
-        unless (isVersionAppropriate updateVersion) $
+        unless (isVersionAppropriate uc updateVersion) $
             reportFatalError $
             sformat ("Update #"%build%" hasn't been downloaded: "%
                     "its version is not newer than current software "%
@@ -154,9 +156,10 @@ downloadUpdateDo updHash cps@ConfirmedProposalState {..} = do
             cpsUpdateProposal e
     -- Check that we really should download an update with given
     -- 'SoftwareVersion'.
-    isVersionAppropriate :: SoftwareVersion -> Bool
-    isVersionAppropriate ver = svAppName ver == svAppName curSoftwareVersion
-        && svNumber ver > svNumber curSoftwareVersion
+    isVersionAppropriate :: UpdateConfiguration -> SoftwareVersion -> Bool
+    isVersionAppropriate uc ver =
+        svAppName ver == svAppName (curSoftwareVersion uc)
+        && svNumber ver > svNumber (curSoftwareVersion uc)
 
 -- Download a file by its hash.
 --

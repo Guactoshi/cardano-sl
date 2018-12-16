@@ -1,4 +1,4 @@
-resolver: lts-11.13
+resolver: lts-12.17
 
 flags:
   ether:
@@ -33,30 +33,33 @@ packages:
 - explorer
 - node
 - tools
+- tools/post-mortem
+- utxo
 - wallet
-- wallet/test
-- wallet-new # The new (unreleased) version of the wallet
 - node-ipc
+- faucet
 - acid-state-exts
+- x509
+- cluster
+- mnemonic
 
 # IOHK projects:
 
-# TODO(parsonsmatt): There have been some breaking changes with Plutus for
-# cardano-sl and it would be nice to have some help from that team to get this
-# updated and back on IOHK.
-- location:
-    git: https://github.com/avieth/plutus-prototype
-    commit: d094be301195fcd8ab864d793f114970426a4478
-  extra-dep: true
-
 - location:
     git: https://github.com/input-output-hk/cardano-report-server.git
-    commit: 81eea7361a75923f9402fcb7840fb36722dbf88e # master 0.4.10
+    commit: 93f2246c54436e7f98cc363b4e0f8f1cb5e78717
   extra-dep: true
 
+# Once https://github.com/input-output-hk/cardano-crypto/pull/46
+# is merged we can go back to input-output-hk/cardano-crypto
 - location:
-    git: https://github.com/input-output-hk/cardano-crypto
-    commit: 33c7ecc6e4bd71c3ea0195e9d796eeace7be22cf
+    git: https://github.com/angerman/cardano-crypto
+    commit: 1e436fe8b69e7c8b399937db394d99229fcd775c
+  extra-dep: true
+# to be removed when haskell-ip is in the current stackage version
+- location:
+    git: https://github.com/andrewthad/haskell-ip
+    commit: 9bb453139aa82cc973125091800422a523e1eb8f
   extra-dep: true
 
 ## Vendored/Forked dependencies
@@ -66,15 +69,6 @@ packages:
 # 2. what branch the commit is on
 # 3. a link to the PR that upstreams the patch
 #
-# Has support for canonical cbor. This commit is pulled into `master`. I've
-# posted a GitHub issue requesting a Hackage release:
-# https://github.com/well-typed/cborg/issues/171
-- location:
-    git: https://github.com/well-typed/cborg
-    commit: 3d274c14ca3077c3a081ba7ad57c5182da65c8c1
-  subdirs:
-  - cborg
-  extra-dep: true
 
 # this extra-dep is to avoid printing microseconds with unicode
 # no PR upstream was made
@@ -88,12 +82,6 @@ packages:
 - location:
     git: https://github.com/serokell/kademlia.git
     commit: 7120bb4d28e708acd52dfd61d3dca7914fac7d7f # master
-  extra-dep: true
-
-# We're waiting on next release: https://github.com/thoughtpolice/hs-ed25519/issues/20
-- location:
-    git: https://github.com/thoughtpolice/hs-ed25519
-    commit: da4247b5b3420120e20451e6a252e2a2ca15b43c
   extra-dep: true
 
 # These three are needed for cardano-sl-networking
@@ -122,11 +110,11 @@ packages:
       commit: 5d8ff2b07b9df35cf61329a3d975e2c8cf95c12a
   extra-dep: true
 
-# Waiting on the flexible types PR to be merged:
-# https://github.com/acid-state/acid-state/pull/94
+# Waiting on the space leak bug fix PR to be merged:
+# https://github.com/acid-state/acid-state/pull/104
 - location:
     git: https://github.com/parsonsmatt/acid-state
-    commit: 63ac55ae020655104936d8a90ccc6a939642cd0d
+    commit: a1b23e2056f134e53f705a694ab85deeecabec5c
   extra-dep: true
 
 # Required for explorer.
@@ -134,7 +122,7 @@ packages:
 # add any features nor fix any bugs.
 - location:
     git: https://github.com/input-output-hk/engine.io.git
-    commit: d3c55f51bb81cee7d0d551de930ce65fe7d76756
+    commit: 8f9216b8f9c7bd96cb1feeb82db5271744d67fcd
   extra-dep: true
   subdirs:
     - socket-io
@@ -166,23 +154,16 @@ packages:
 # buggy async
 - location:
     git: https://github.com/input-output-hk/log-warper.git
-    commit: 4af8114fbcd5698a4e1fbc653031f0300e29faee
+    commit: 0b7d4d48310f139d75829d31883aaa87ce53312c
   extra-dep: true
 
 # Exposes a custom discovery function so you can specify the prefix.
 # https://github.com/hedgehogqa/haskell-hedgehog/compare/master...input-output-hk:master
 - location:
     git: https://github.com/input-output-hk/haskell-hedgehog.git
-    commit: 2c9e51804e8217dff89f5c32cbe0d79ce20bc508
+    commit: 2e741bb53afb085741807018948ae17d956c53af
   subdirs:
     - hedgehog
-  extra-dep: true
-
-# servant-quickcheck has a doc/doc.cabal file that is poorly specified and this
-# breaks the mafia build tool.
-- location:
-    git: https://github.com/avieth/servant-quickcheck.git
-    commit: e4e879abca99d0d56015765859fb37af59a81dbb
   extra-dep: true
 
 # Add custom stylish-haskell while waiting for PR upstream: https://github.com/jaspervdj/stylish-haskell/pull/214
@@ -206,116 +187,82 @@ packages:
     commit: 4ead9809e119483e7832da5f8224b0c4d4a2d5d6
   extra-dep: true
 
+# Inspector, as used in cardano-crypto
+- location:
+    git: https://github.com/primetype/inspector.git
+    commit: 964558881210bf1f9387b51ab05057b1290d1d71
+  extra-dep: true
+
 nix:
-  shell-file: shell.nix
+  shell-file: nix/stack-shell.nix
 
 extra-deps:
-# Needed to fix an issue with CTX_INIT failing to build on newer openssl
-# versions.
-- cryptonite-openssl-0.7
-# Very important! First release with a fix of 'race' and 'cancel'.
-#   https://github.com/simonmar/async/issues/59
-#   https://github.com/simonmar/async/issues/81
-# It has yet to appear in an LTS.
-- async-2.2.1
-# There are 2 asyncs -_-
-- lifted-async-0.10.0.1
-
 # Serokell-specific utilities not on stackage
 - fmt-0.6
 
-# Following 10 are not on stackage.
-- pvss-0.2.0
-- systemd-1.1.2
-- base58-bytestring-0.1.0
-- pipes-interleave-1.1.2
-- tabl-1.0.3
-- loc-0.1.3.2
-- json-sop-0.2.0.3
-- lens-sop-0.2.0.2
-- lzma-clib-5.2.2
-- micro-recursion-schemes-5.0.2.2
-
-# The changelog for directory-1.3.1.1 indicate some potentially important
-# bugfixes over directory-1.3.0.2, which is what's on lts-11.
-- directory-1.3.1.1
-# https://github.com/commercialhaskell/stack/issues/3151
-- happy-1.19.5
-# Good bug fixes in here.
-- criterion-1.4.0.0
-
-# Fix for a space leak: https://github.com/chrisdone/formatting/pull/44
-- formatting-6.3.6
-
 # Servant stuff not found on stackage
 - servant-multipart-0.11.2
-# Because of servant-quickcheck
-# It defines serverSatisfiesMgr, but requires a newer hspec.
-- hspec-2.5.1
-- hspec-core-2.5.1
-- hspec-discover-2.5.1
-
-# Graphics stuff not found on stackage.
-- Chart-diagrams-1.8.2
-- graphviz-2999.19.0.0
-- diagrams-core-1.4.1.1
-- diagrams-lib-1.4.2
-- diagrams-postscript-1.4
-- diagrams-svg-1.4.1.1
-- diagrams-solve-0.1.1
-- SVGFonts-1.6.0.3
-- dual-tree-0.2.1
-
-# Support for wallet's Txmeta tracking
-- sqlite-simple-errors-0.6.1.0
-
-# Working around a stack issue with rebuilding dependencies
-- pretty-show-1.7
 
 # Needed for coin selection in the wallet
 - normaldistribution-1.1.0.3
 
 # This used to be Serokell.Aeson.Options
 - aeson-options-0.0.0
-
-# universum depends on tasty-hedgehog
-# tasty-hedgehog < 0.2 depends on hedgehog < 0.6
-# LTS-11.13 -- LTS-11.17 provide tasty-hedgehog-0.1.0.2
-# thus to use our hedgehog-0.6+ from source,
-# we need to explicilty bump tasty-hedgehog to 0.2.0.0.
-- tasty-hedgehog-0.2.0.0
-
-- file-embed-lzma-0
-- servant-swagger-ui-core-0.3.1
-- servant-swagger-ui-0.3.0.3.13.2
 - servant-swagger-ui-redoc-0.3.0.1.21.2
+
+# Needed to LTS-12.16 compatibility
+- wai-middleware-throttle-0.3.0.0
+- ether-0.5.1.0
+- servant-quickcheck-0.0.7.2
+- o-clock-0.1.1
+- beam-sqlite-0.3.2.3
+- katip-0.6.3.0
+- Chart-1.9
+- Chart-diagrams-1.9
+- SVGFonts-1.6.0.3
+- pvss-0.2.0
+- systemd-1.1.2
+- base58-bytestring-0.1.0
+- pipes-interleave-1.1.3
+- tabl-1.0.3
+- loc-0.1.3.3
+- hspec-2.5.5
+- micro-recursion-schemes-5.0.2.2
+- token-bucket-0.1.0.1
+- lzma-clib-5.2.2
+
+# katip-0.6.3.0 conflicts with Win32-2.6.1.0
+allow-newer: true
 
 # This is for CI to pass --fast to all dependencies
 apply-ghc-options: everything
 
 # If you find it too restrictive, you can use `scripts/build/cardano-sl.sh' script
 ghc-options:
-  cardano-sl:             -Werror -Wcompat -fwarn-redundant-constraints
-  cardano-sl-auxx:        -Werror -Wcompat -fwarn-redundant-constraints
-  cardano-sl-binary:      -Werror -Wcompat -fwarn-redundant-constraints
-  cardano-sl-binary-test: -Werror -Wcompat -fwarn-redundant-constraints
-  cardano-sl-chain:       -Werror -Wcompat -fwarn-redundant-constraints
-  cardano-sl-chain-test:  -Werror -Wcompat -fwarn-redundant-constraints
-  cardano-sl-client:      -Werror -Wcompat -fwarn-redundant-constraints
-  cardano-sl-core:        -Werror -Wcompat -fwarn-redundant-constraints
-  cardano-sl-core-test:   -Werror -Wcompat -fwarn-redundant-constraints
-  cardano-sl-crypto:      -Werror -Wcompat -fwarn-redundant-constraints
-  cardano-sl-crypto-test: -Werror -Wcompat -fwarn-redundant-constraints
-  cardano-sl-db:          -Werror -Wcompat -fwarn-redundant-constraints
-  cardano-sl-db-test:     -Werror -Wcompat -fwarn-redundant-constraints
-  cardano-sl-explorer:    -Werror -Wcompat -fwarn-redundant-constraints
-  cardano-sl-generator:   -Werror -Wcompat -fwarn-redundant-constraints
-  cardano-sl-infra:       -Werror -Wcompat -fwarn-redundant-constraints
-  cardano-sl-networking:  -Werror -Wcompat -fwarn-redundant-constraints
-  cardano-sl-node:        -Werror -Wcompat -fwarn-redundant-constraints
-  cardano-sl-tools:       -Werror -Wcompat -fwarn-redundant-constraints
-  cardano-sl-util:        -Werror -Wcompat -fwarn-redundant-constraints
-  cardano-sl-util-test:   -Werror -Wcompat -fwarn-redundant-constraints
-  cardano-sl-wallet:      -Werror -Wcompat -fwarn-redundant-constraints
-  cardano-sl-wallet-new:  -Werror -Wcompat -fwarn-redundant-constraints
-  cardano-sl-node-ipc:    -Werror -Wcompat -fwarn-redundant-constraints
+  cardano-sl:                   -Wall -Werror -Wcompat -fwarn-redundant-constraints
+  cardano-sl-auxx:              -Wall -Werror -Wcompat -fwarn-redundant-constraints
+  cardano-sl-binary:            -Wall -Werror -Wcompat -fwarn-redundant-constraints
+  cardano-sl-binary-test:       -Wall -Werror -Wcompat -fwarn-redundant-constraints
+  cardano-sl-chain:             -Wall -Werror -Wcompat -fwarn-redundant-constraints
+  cardano-sl-chain-test:        -Wall -Werror -Wcompat -fwarn-redundant-constraints
+  cardano-sl-client:            -Wall -Werror -Wcompat -fwarn-redundant-constraints
+  cardano-sl-core:              -Wall -Werror -Wcompat -fwarn-redundant-constraints
+  cardano-sl-core-test:         -Wall -Werror -Wcompat -fwarn-redundant-constraints
+  cardano-sl-crypto:            -Wall -Werror -Wcompat -fwarn-redundant-constraints
+  cardano-sl-crypto-test:       -Wall -Werror -Wcompat -fwarn-redundant-constraints
+  cardano-sl-db:                -Wall -Werror -Wcompat -fwarn-redundant-constraints
+  cardano-sl-db-test:           -Wall -Werror -Wcompat -fwarn-redundant-constraints
+  cardano-sl-explorer:          -Wall -Werror -Wcompat -fwarn-redundant-constraints
+  cardano-sl-generator:         -Wall -Werror -Wcompat -fwarn-redundant-constraints
+  cardano-sl-infra:             -Wall -Werror -Wcompat -fwarn-redundant-constraints
+  cardano-sl-networking:        -Werror -Wcompat -fwarn-redundant-constraints
+  cardano-sl-node:              -Wall -Werror -Wcompat -fwarn-redundant-constraints
+  cardano-sl-tools:             -Wall -Werror -Wcompat -fwarn-redundant-constraints
+  cardano-sl-tools-post-mortem: -Wall -Werror -Wcompat -fwarn-redundant-constraints
+  cardano-sl-util:              -Wall -Werror -Wcompat -fwarn-redundant-constraints
+  cardano-sl-util-test:         -Wall -Werror -Wcompat -fwarn-redundant-constraints
+  cardano-sl-node-ipc:          -Wall -Werror -Wcompat -fwarn-redundant-constraints
+  cardano-sl-x509:              -Wall -Werror -Wcompat -fwarn-redundant-constraints
+  cardano-sl-mnemonic:          -Wall -Werror -Wcompat -fwarn-redundant-constraints
+  cardano-sl-cluster:           -Wall -Werror -Wcompat -fwarn-redundant-constraints
+  cardano-wallet:               -Wall -Werror -Wcompat -fwarn-redundant-constraints

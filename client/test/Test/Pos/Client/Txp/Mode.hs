@@ -7,7 +7,6 @@
 module Test.Pos.Client.Txp.Mode
        ( TxpTestProperty
        , TxpTestMode
-       , HasTxpConfigurations
        , withBVData
        ) where
 
@@ -17,28 +16,14 @@ import qualified Data.ByteString as BS
 import           Test.QuickCheck (Testable (..), ioProperty)
 import           Test.QuickCheck.Monadic (PropertyM, monadic)
 
-import           Pos.Chain.Ssc (HasSscConfiguration)
-import           Pos.Chain.Update (HasUpdateConfiguration)
+import           Pos.Chain.Update (BlockVersionData)
 import           Pos.Client.Txp.Addresses (MonadAddresses (..))
-import           Pos.Configuration (HasNodeConfiguration)
-import           Pos.Core (Address, HasConfiguration, makePubKeyAddressBoot)
-import           Pos.Core.Configuration (HasGenesisBlockVersionData,
-                     genesisBlockVersionData)
-import           Pos.Core.Update (BlockVersionData)
+import           Pos.Core (Address, makePubKeyAddressBoot)
+import           Pos.Core.NetworkMagic (NetworkMagic (..))
 import           Pos.Crypto (deterministicKeyGen)
 import           Pos.DB (MonadGState (..))
 
-----------------------------------------------------------------------------
--- Configuration propagation
-----------------------------------------------------------------------------
-
-type HasTxpConfigurations =
-       ( HasNodeConfiguration
-       , HasSscConfiguration
-       , HasConfiguration
-       , HasUpdateConfiguration
-       , HasGenesisBlockVersionData
-       )
+import           Test.Pos.Chain.Genesis.Dummy (dummyBlockVersionData)
 
 ----------------------------------------------------------------------------
 -- Mock for TxCreateMode
@@ -55,16 +40,16 @@ instance MonadGState TxpTestMode where
 
 instance MonadAddresses TxpTestMode where
     type AddrData TxpTestMode = ()
-    getNewAddress _ = pure fakeAddressForMonadAddresses
-    getFakeChangeAddress = pure fakeAddressForMonadAddresses
+    getNewAddress nm _ _ = pure (fakeAddressForMonadAddresses nm)
+    getFakeChangeAddress nm _ = pure (fakeAddressForMonadAddresses nm)
 
-fakeAddressForMonadAddresses :: Address
-fakeAddressForMonadAddresses = address
+fakeAddressForMonadAddresses :: NetworkMagic -> Address
+fakeAddressForMonadAddresses nm = address
   where
     -- seed for address generation is a ByteString with 32 255's
     seedSize = 32
     seed = BS.replicate seedSize (255 :: Word8)
-    address = makePubKeyAddressBoot $ fst $ deterministicKeyGen seed
+    address = makePubKeyAddressBoot nm $ fst $ deterministicKeyGen seed
 
 withBVData
   :: MonadReader BlockVersionData m
@@ -83,8 +68,8 @@ type TxpTestProperty = PropertyM TxpTestMode
 -- type families cannot be OVERLAPPABLE.
 instance MonadAddresses TxpTestProperty where
     type AddrData TxpTestProperty = AddrData TxpTestMode
-    getNewAddress = lift . getNewAddress
-    getFakeChangeAddress = lift getFakeChangeAddress
+    getNewAddress nm epochSlots = lift . (getNewAddress nm epochSlots)
+    getFakeChangeAddress nm = lift . (getFakeChangeAddress nm)
 
-instance (HasTxpConfigurations, Testable a) => Testable (TxpTestProperty a) where
-    property = monadic (ioProperty . flip runReaderT genesisBlockVersionData)
+instance Testable a => Testable (TxpTestProperty a) where
+    property = monadic (ioProperty . flip runReaderT dummyBlockVersionData)

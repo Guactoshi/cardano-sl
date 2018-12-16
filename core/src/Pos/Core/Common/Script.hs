@@ -1,7 +1,8 @@
+{-# LANGUAGE RecordWildCards #-}
+
 module Pos.Core.Common.Script
        ( Script (..)
        , ScriptVersion
-       , Script_v0
        ) where
 
 import           Universum
@@ -11,7 +12,6 @@ import           Data.Aeson (FromJSON (..), ToJSON (toJSON), object, withObject,
 import           Data.SafeCopy (base, deriveSafeCopySimple)
 import           Formatting (bprint, int, (%))
 import qualified Formatting.Buildable as Buildable
-import qualified PlutusCore.Program as PLCore
 import           Serokell.Util.Base64 (JsonByteString (..))
 
 import qualified Pos.Binary.Class as Bi
@@ -49,6 +49,3 @@ Bi.deriveSimpleBi ''Script [
     ]]
 
 deriveSafeCopySimple 0 'base ''Script
-
--- | Deserialized script (i.e. an AST), version 0.
-type Script_v0 = PLCore.Program

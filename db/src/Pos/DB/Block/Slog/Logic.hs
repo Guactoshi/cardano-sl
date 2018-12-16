@@ -1,4 +1,5 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
+{-# LANGUAGE RecordWildCards     #-}
 {-# LANGUAGE TypeFamilies        #-}
 
 -- | This module does some hard work related to block processing
@@ -26,30 +27,29 @@ import           Universum
 import           Control.Lens (_Wrapped)
 import           Control.Monad.Except (MonadError (throwError))
 import qualified Data.List.NonEmpty as NE
-import           Formatting (build, sformat, (%))
+import           Formatting (build, sformat, shown, (%))
 import           Serokell.Util (Color (Red), colorize)
 import           Serokell.Util.Verify (formatAllErrors, verResToMonadError)
-import           System.Wlog (WithLogger)
 
-import           Pos.Chain.Block (Blund, HasSlogGState, SlogUndo (..),
-                     Undo (..), verifyBlocks)
-import           Pos.Chain.Update (HasUpdateConfiguration,
+import           Pos.Chain.Block (Block, Blund, HasSlogGState, SlogUndo (..),
+                     Undo (..), genBlockLeaders, headerHash, headerHashG,
+                     mainBlockSlot, prevBlockL, verifyBlocks)
+import           Pos.Chain.Genesis as Genesis (Config (..), configEpochSlots,
+                     configK)
+import           Pos.Chain.Update (BlockVersion (..), UpdateConfiguration,
                      lastKnownBlockVersion)
-import           Pos.Core (FlatSlotId, blkSecurityParam, difficultyL,
-                     epochIndexL, flattenSlotId)
-import           Pos.Core.Block (Block, genBlockLeaders, headerHash,
-                     headerHashG, mainBlockSlot, prevBlockL)
+import           Pos.Core (BlockCount, FlatSlotId, ProtocolConstants,
+                     difficultyL, epochIndexL, flattenSlotId, kEpochSlots,
+                     pcBlkSecurityParam)
 import           Pos.Core.Chrono (NE, NewestFirst (getNewestFirst),
                      OldestFirst (..), toOldestFirst, _OldestFirst)
 import           Pos.Core.Exception (assertionFailed, reportFatalError)
-import           Pos.Core.Slotting (MonadSlots)
-import           Pos.Core.Update (BlockVersion (..))
-import           Pos.Crypto (ProtocolMagic)
+import           Pos.Core.NetworkMagic (NetworkMagic (..))
+import           Pos.Core.Slotting (MonadSlots, SlotId)
 import           Pos.DB (SomeBatchOp (..))
 import           Pos.DB.Block.BListener (MonadBListener (..))
 import qualified Pos.DB.Block.GState.BlockExtra as GS
 import           Pos.DB.Block.Load (putBlunds)
-import           Pos.DB.Block.Logic.Types (VerifyBlocksContext (..))
 import           Pos.DB.Block.Slog.Context (slogGetLastSlots, slogPutLastSlots)
 import qualified Pos.DB.BlockIndex as DB
 import           Pos.DB.Class (MonadDB (..), MonadDBRead)
@@ -58,8 +58,11 @@ import qualified Pos.DB.GState.Common as GS
                      getMaxSeenDifficulty)
 import           Pos.DB.Lrc (HasLrcContext, lrcActionOnEpochReason)
 import qualified Pos.DB.Lrc as LrcDB
+import           Pos.DB.Update (getAdoptedBVFull, getConsensusEra)
 import           Pos.Util (_neHead, _neLast)
 import           Pos.Util.AssertMode (inAssertMode)
+import           Pos.Util.Util (HasLens', lensOf)
+import           Pos.Util.Wlog (WithLogger, logInfo)
 
 ----------------------------------------------------------------------------
 -- Helpers
@@ -89,12 +92,12 @@ import           Pos.Util.AssertMode (inAssertMode)
 -- done only if `alt` component is the same as adopted one. In
 -- other cases (i. e. when our `(major, minor)` is less than from
 -- adopted version) check is not done.
-mustDataBeKnown :: HasUpdateConfiguration => BlockVersion -> Bool
-mustDataBeKnown adoptedBV =
-    lastKnownMajMin > adoptedMajMin || lastKnownBlockVersion == adoptedBV
+mustDataBeKnown :: UpdateConfiguration -> BlockVersion -> Bool
+mustDataBeKnown uc adoptedBV =
+    lastKnownMajMin > adoptedMajMin || lastKnownBlockVersion uc == adoptedBV
   where
     toMajMin BlockVersion {..} = (bvMajor, bvMinor)
-    lastKnownMajMin = toMajMin lastKnownBlockVersion
+    lastKnownMajMin = toMajMin (lastKnownBlockVersion uc)
     adoptedMajMin = toMajMin adoptedBV
 
 ----------------------------------------------------------------------------
@@ -107,7 +110,7 @@ type MonadSlogBase ctx m =
     , MonadIO m
     , MonadDBRead m
     , WithLogger m
-    , HasUpdateConfiguration
+    , HasLens' ctx UpdateConfiguration
     )
 
 -- | Set of constraints needed for Slog verification.
@@ -128,12 +131,16 @@ type MonadSlogVerify ctx m =
 -- 3.  Compute 'SlogUndo's and return them.
 slogVerifyBlocks
     :: MonadSlogVerify ctx m
-    => ProtocolMagic
-    -> VerifyBlocksContext
+    => Genesis.Config
+    -> Maybe SlotId -- ^ current slot
     -> OldestFirst NE Block
     -> m (Either Text (OldestFirst NE SlogUndo))
-slogVerifyBlocks pm ctx blocks = runExceptT $ do
-    let dataMustBeKnown = mustDataBeKnown (vbcBlockVersion ctx)
+slogVerifyBlocks genesisConfig curSlot blocks = runExceptT $ do
+    uc <- view (lensOf @UpdateConfiguration)
+    era <- getConsensusEra
+    logInfo $ sformat ("slogVerifyBlocks: Consensus era is " % shown) era
+    (adoptedBV, adoptedBVD) <- lift getAdoptedBVFull
+    let dataMustBeKnown = mustDataBeKnown uc adoptedBV
     let headEpoch = blocks ^. _Wrapped . _neHead . epochIndexL
     leaders <- lift $
         lrcActionOnEpochReason
@@ -154,17 +161,19 @@ slogVerifyBlocks pm ctx blocks = runExceptT $ do
     let blocksList :: OldestFirst [] Block
         blocksList = OldestFirst (NE.toList (getOldestFirst blocks))
     verResToMonadError formatAllErrors $
-        verifyBlocks pm
-            (vbcCurrentSlot ctx)
+        verifyBlocks
+            genesisConfig
+            curSlot
             dataMustBeKnown
-            (vbcBlockVersionData ctx)
+            adoptedBVD
             leaders
             blocksList
     -- Here we need to compute 'SlogUndo'. When we apply a block,
     -- we can remove one of the last slots stored in 'BlockExtra'.
     -- This removed slot must be put into 'SlogUndo'.
     lastSlots <- lift GS.getLastSlots
-    let toFlatSlot = fmap (flattenSlotId . view mainBlockSlot) . rightToMaybe
+    let toFlatSlot =
+            fmap (flattenSlotId (configEpochSlots genesisConfig) . view mainBlockSlot) . rightToMaybe
     -- these slots will be added if we apply all blocks
     let newSlots = mapMaybe toFlatSlot (toList blocks)
     let combinedSlots :: OldestFirst [] FlatSlotId
@@ -174,7 +183,7 @@ slogVerifyBlocks pm ctx blocks = runExceptT $ do
     let removedSlots :: OldestFirst [] FlatSlotId
         removedSlots =
             combinedSlots & _Wrapped %~
-            (take $ length combinedSlots - fromIntegral blkSecurityParam)
+            (take $ length combinedSlots - configK genesisConfig)
     -- Note: here we exploit the fact that genesis block can be only 'head'.
     -- If we have genesis block, then size of 'newSlots' will be less than
     -- number of blocks we verify. It means that there will definitely
@@ -219,10 +228,12 @@ newtype ShouldCallBListener = ShouldCallBListener Bool
 --     6. Setting @inMainChain@ flags
 slogApplyBlocks
     :: MonadSlogApply ctx m
-    => ShouldCallBListener
+    => NetworkMagic
+    -> BlockCount
+    -> ShouldCallBListener
     -> OldestFirst NE Blund
     -> m SomeBatchOp
-slogApplyBlocks (ShouldCallBListener callBListener) blunds = do
+slogApplyBlocks nm k (ShouldCallBListener callBListener) blunds = do
     -- Note: it's important to put blunds first. The invariant is that
     -- the sequence of blocks corresponding to the tip must exist in
     -- BlockDB. If program is interrupted after we put blunds and
@@ -232,7 +243,7 @@ slogApplyBlocks (ShouldCallBListener callBListener) blunds = do
     -- If the program is interrupted at this point (after putting blunds
     -- in BlockDB), we will have garbage blunds in BlockDB, but it's not a
     -- problem.
-    bListenerBatch <- if callBListener then onApplyBlocks blunds
+    bListenerBatch <- if callBListener then onApplyBlocks nm blunds
                       else pure mempty
 
     let newestBlock = NE.last $ getOldestFirst blunds
@@ -256,7 +267,7 @@ slogApplyBlocks (ShouldCallBListener callBListener) blunds = do
         toList $
         fmap (GS.SetInMainChain True . view headerHashG . fst) blunds
     mainBlocks = rights $ toList blocks
-    newSlots = flattenSlotId . view mainBlockSlot <$> mainBlocks
+    newSlots = flattenSlotId (kEpochSlots k) . view mainBlockSlot <$> mainBlocks
     newLastSlots lastSlots = lastSlots & _Wrapped %~ updateLastSlots
     knownSlotsBatch lastSlots
         | null newSlots = []
@@ -264,7 +275,7 @@ slogApplyBlocks (ShouldCallBListener callBListener) blunds = do
     -- Slots are in 'OldestFirst' order. So we put new slots to the
     -- end and drop old slots from the beginning.
     updateLastSlots lastSlots =
-        leaveAtMostN (fromIntegral blkSecurityParam) (lastSlots ++ newSlots)
+        leaveAtMostN (fromIntegral k) (lastSlots ++ newSlots)
     leaveAtMostN :: Int -> [a] -> [a]
     leaveAtMostN n lst = drop (length lst - n) lst
     blockExtraBatch lastSlots =
@@ -287,11 +298,13 @@ newtype BypassSecurityCheck = BypassSecurityCheck Bool
 --     5. Removing @inMainChain@ flags
 slogRollbackBlocks ::
        MonadSlogApply ctx m
-    => BypassSecurityCheck -- ^ is rollback for more than k blocks allowed?
+    => NetworkMagic
+    -> ProtocolConstants
+    -> BypassSecurityCheck -- ^ is rollback for more than k blocks allowed?
     -> ShouldCallBListener
     -> NewestFirst NE Blund
     -> m SomeBatchOp
-slogRollbackBlocks (BypassSecurityCheck bypassSecurity) (ShouldCallBListener callBListener) blunds = do
+slogRollbackBlocks nm pc (BypassSecurityCheck bypassSecurity) (ShouldCallBListener callBListener) blunds = do
     inAssertMode $ when (isGenesis0 (blocks ^. _Wrapped . _neLast)) $
         assertionFailed $
         colorize Red "FATAL: we are TRYING TO ROLLBACK 0-TH GENESIS block"
@@ -306,12 +319,12 @@ slogRollbackBlocks (BypassSecurityCheck bypassSecurity) (ShouldCallBListener cal
             -- no underflow from subtraction
             maxSeenDifficulty >= resultingDifficulty &&
             -- no rollback further than k blocks
-            maxSeenDifficulty - resultingDifficulty <= fromIntegral blkSecurityParam
+            maxSeenDifficulty - resultingDifficulty <= fromIntegral (pcBlkSecurityParam pc)
     unless (bypassSecurity || secure) $
         reportFatalError "slogRollbackBlocks: the attempted rollback would \
                          \lead to a more than 'k' distance between tip and \
                          \last seen block, which is a security risk. Aborting."
-    bListenerBatch <- if callBListener then onRollbackBlocks blunds
+    bListenerBatch <- if callBListener then onRollbackBlocks nm pc blunds
                       else pure mempty
     let putTip =
             SomeBatchOp $ GS.PutTip $

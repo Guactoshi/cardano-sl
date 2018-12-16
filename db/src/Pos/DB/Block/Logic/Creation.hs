@@ -21,40 +21,37 @@ import           Control.Monad.Except (MonadError (throwError), runExceptT)
 import           Data.Default (Default (def))
 import           Formatting (build, fixed, ords, sformat, stext, (%))
 import           Serokell.Data.Memory.Units (Byte, memory)
-import           System.Wlog (WithLogger, logDebug)
 
 import           Pos.Binary.Class (biSize)
-import           Pos.Chain.Block (HasSlogGState (..))
+import           Pos.Chain.Block (BlockHeader (..), GenesisBlock,
+                     HasSlogGState (..), HeaderHash, MainBlock, MainBody,
+                     headerHash, mkGenesisBlock, mkMainBlock)
+import qualified Pos.Chain.Block as BC
 import           Pos.Chain.Delegation (DelegationVar, DlgPayload (..),
                      ProxySKBlockInfo)
-import           Pos.Chain.Ssc (MonadSscMem, defaultSscPayload, stripSscPayload)
-import           Pos.Chain.Txp (TxpConfiguration, emptyTxPayload)
-import           Pos.Chain.Update (HasUpdateConfiguration, curSoftwareVersion,
-                     lastKnownBlockVersion)
-import           Pos.Core (EpochIndex, EpochOrSlot (..), HasProtocolConstants,
-                     SlotId (..), chainQualityThreshold, epochIndexL,
-                     epochSlots, flattenSlotId, getEpochOrSlot)
-import           Pos.Core.Block (BlockHeader (..), Blockchain (..),
-                     GenesisBlock, HeaderHash, MainBlock, MainBlockchain,
-                     headerHash)
-import qualified Pos.Core.Block as BC
-import           Pos.Core.Block.Constructors (mkGenesisBlock, mkMainBlock)
+import           Pos.Chain.Genesis as Genesis (Config (..),
+                     configBlkSecurityParam, configBlockVersionData,
+                     configEpochSlots)
+import           Pos.Chain.Ssc (MonadSscMem, SscPayload, defaultSscPayload,
+                     stripSscPayload)
+import           Pos.Chain.Txp (TxAux (..), TxpConfiguration, emptyTxPayload,
+                     mkTxPayload)
+import           Pos.Chain.Update (UpdateConfiguration, UpdatePayload (..),
+                     curSoftwareVersion, lastKnownBlockVersion)
+import           Pos.Core (BlockCount, EpochIndex, EpochOrSlot (..),
+                     SlotId (..), epochIndexL, flattenSlotId, getEpochOrSlot,
+                     kChainQualityThreshold, kEpochSlots,
+                     localSlotIndexMinBound)
 import           Pos.Core.Context (HasPrimaryKey, getOurSecretKey)
 import           Pos.Core.Exception (assertionFailed, reportFatalError)
 import           Pos.Core.JsonLog (CanJsonLog (..))
 import           Pos.Core.JsonLog.LogEvents (MemPoolModifyReason (..))
 import           Pos.Core.Reporting (HasMisbehaviorMetrics, reportError)
-import           Pos.Core.Ssc (SscPayload)
-import           Pos.Core.StateLock (Priority (..), StateLock, StateLockMetrics,
-                     modifyStateLock)
-import           Pos.Core.Txp (TxAux (..), mkTxPayload)
-import           Pos.Core.Update (UpdatePayload (..))
+import           Pos.Core.Slotting (MonadSlots (getCurrentSlot))
 import           Pos.Core.Util.LogSafe (logInfoS)
-import           Pos.Crypto (ProtocolMagic, SecretKey)
+import           Pos.Crypto (SecretKey)
 import           Pos.DB.Block.Logic.Internal (MonadBlockApply,
                      applyBlocksUnsafe, normalizeMempool)
-import           Pos.DB.Block.Logic.Types (VerifyBlocksContext (..),
-                     getVerifyBlocksContext)
 import           Pos.DB.Block.Logic.Util (calcChainQualityM)
 import           Pos.DB.Block.Logic.VAR (verifyBlocksPrefix)
 import           Pos.DB.Block.Lrc (LrcModeFull, lrcSingleShot)
@@ -62,6 +59,8 @@ import           Pos.DB.Block.Slog.Logic (ShouldCallBListener (..))
 import qualified Pos.DB.BlockIndex as DB
 import           Pos.DB.Class (MonadDBRead)
 import           Pos.DB.Delegation (clearDlgMemPool, getDlgMempool)
+import           Pos.DB.GState.Lock (Priority (..), StateLock, StateLockMetrics,
+                     modifyStateLock)
 import           Pos.DB.Lrc (HasLrcContext, lrcActionOnEpochReason)
 import qualified Pos.DB.Lrc as LrcDB
 import           Pos.DB.Ssc (sscGetLocalPayload, sscResetLocal)
@@ -71,10 +70,11 @@ import           Pos.DB.Update (UpdateContext, clearUSMemPool, getMaxBlockSize,
                      usCanCreateBlock, usPreparePayload)
 import           Pos.Util (_neHead)
 import           Pos.Util.Util (HasLens (..), HasLens')
+import           Pos.Util.Wlog (WithLogger, logDebug)
 
 -- | A set of constraints necessary to create a block from mempool.
 type MonadCreateBlock ctx m
-     = ( HasUpdateConfiguration
+     = ( HasLens' ctx UpdateConfiguration
        , MonadReader ctx m
        , HasPrimaryKey ctx
        , HasSlogGState ctx -- to check chain quality
@@ -120,62 +120,66 @@ createGenesisBlockAndApply ::
        , HasLens (StateLockMetrics MemPoolModifyReason) ctx (StateLockMetrics MemPoolModifyReason)
        , HasMisbehaviorMetrics ctx
        )
-    => ProtocolMagic
+    => Genesis.Config
     -> TxpConfiguration
     -> EpochIndex
     -> m (Maybe GenesisBlock)
 -- Genesis block for 0-th epoch is hardcoded.
 createGenesisBlockAndApply _ _ 0 = pure Nothing
-createGenesisBlockAndApply pm txpConfig epoch = do
+createGenesisBlockAndApply genesisConfig txpConfig epoch = do
     tipHeader <- DB.getTipHeader
     -- preliminary check outside the lock,
     -- must be repeated inside the lock
-    needGen <- needCreateGenesisBlock epoch tipHeader
+    needGen   <- needCreateGenesisBlock (configBlkSecurityParam genesisConfig)
+                                        epoch
+                                        tipHeader
     if needGen
         then modifyStateLock
                  HighPriority
                  ApplyBlock
-                 (\_ -> createGenesisBlockDo pm txpConfig epoch)
+                 (\_ -> createGenesisBlockDo genesisConfig txpConfig epoch)
         else return Nothing
 
 createGenesisBlockDo
     :: forall ctx m.
-       ( MonadCreateBlock ctx m
-       , HasMisbehaviorMetrics ctx
-       )
-    => ProtocolMagic
+       (MonadCreateBlock ctx m, HasMisbehaviorMetrics ctx)
+    => Genesis.Config
     -> TxpConfiguration
     -> EpochIndex
     -> m (HeaderHash, Maybe GenesisBlock)
-createGenesisBlockDo pm txpConfig epoch = do
+createGenesisBlockDo genesisConfig txpConfig epoch = do
     tipHeader <- DB.getTipHeader
     logDebug $ sformat msgTryingFmt epoch tipHeader
-    needCreateGenesisBlock epoch tipHeader >>= \case
-        False -> (BC.blockHeaderHash tipHeader, Nothing) <$ logShouldNot
-        True -> actuallyCreate tipHeader
+    needCreateGenesisBlock (configBlkSecurityParam genesisConfig) epoch tipHeader
+        >>= \case
+                False ->
+                    (BC.blockHeaderHash tipHeader, Nothing) <$ logShouldNot
+                True -> actuallyCreate tipHeader
   where
     -- We need to run LRC here to make 'verifyBlocksPrefix' not hang.
     -- It's important to do it after taking 'StateLock'.
     -- Note that it shouldn't fail, because 'shouldCreate' guarantees that we
     -- have enough blocks for LRC.
     actuallyCreate tipHeader = do
-        lrcSingleShot pm epoch
+        lrcSingleShot genesisConfig epoch
         leaders <- lrcActionOnEpochReason epoch "createGenesisBlockDo "
             LrcDB.getLeadersForEpoch
-        let blk = mkGenesisBlock pm (Right tipHeader) epoch leaders
+        let blk = mkGenesisBlock (configProtocolMagic genesisConfig)
+                                 (Right tipHeader)
+                                 epoch
+                                 leaders
         let newTip = headerHash blk
-        ctx <- getVerifyBlocksContext
-        verifyBlocksPrefix pm ctx (one (Left blk)) >>= \case
+        curSlot <- getCurrentSlot $ configEpochSlots genesisConfig
+        verifyBlocksPrefix genesisConfig curSlot (one (Left blk)) >>= \case
             Left err -> reportFatalError $ pretty err
             Right (undos, pollModifier) -> do
                 let undo = undos ^. _Wrapped . _neHead
-                applyBlocksUnsafe pm
-                    (vbcBlockVersion ctx)
-                    (vbcBlockVersionData ctx)
+                applyBlocksUnsafe
+                    genesisConfig
                     (ShouldCallBListener True)
                     (one (Left blk, undo))
                     (Just pollModifier)
-                normalizeMempool pm txpConfig
+                normalizeMempool genesisConfig txpConfig
                 pure (newTip, Just blk)
     logShouldNot =
         logDebug
@@ -184,13 +188,13 @@ createGenesisBlockDo pm txpConfig epoch = do
         "We are trying to create genesis block for " %ords %
         " epoch, our tip header is\n" %build
 
-needCreateGenesisBlock ::
-       ( MonadCreateBlock ctx m
-       )
-    => EpochIndex
+needCreateGenesisBlock
+    :: MonadCreateBlock ctx m
+    => BlockCount
+    -> EpochIndex
     -> BlockHeader
     -> m Bool
-needCreateGenesisBlock epoch tipHeader = do
+needCreateGenesisBlock k epoch tipHeader = do
     case tipHeader of
         BlockHeaderGenesis _ -> pure False
         -- This is true iff tip is from 'epoch' - 1 and last
@@ -199,12 +203,12 @@ needCreateGenesisBlock epoch tipHeader = do
         BlockHeaderMain mb ->
             if mb ^. epochIndexL /= epoch - 1
                 then pure False
-                else calcChainQualityM (flattenSlotId $ SlotId epoch minBound) <&> \case
+                else calcChainQualityM k (flattenSlotId (kEpochSlots k) $ SlotId epoch localSlotIndexMinBound) <&> \case
                          Nothing -> False -- if we can't compute chain
                                           -- quality, we probably
                                           -- shouldn't try to create
                                           -- blocks
-                         Just cq -> chainQualityThreshold @Double <= cq
+                         Just cq -> kChainQualityThreshold @Double k <= cq
 
 ----------------------------------------------------------------------------
 -- MainBlock
@@ -228,18 +232,18 @@ createMainBlockAndApply ::
        , HasLens' ctx StateLock
        , HasLens' ctx (StateLockMetrics MemPoolModifyReason)
        )
-    => ProtocolMagic
+    => Genesis.Config
     -> TxpConfiguration
     -> SlotId
     -> ProxySKBlockInfo
     -> m (Either Text MainBlock)
-createMainBlockAndApply pm txpConfig sId pske =
+createMainBlockAndApply genesisConfig txpConfig sId pske =
     modifyStateLock HighPriority ApplyBlock createAndApply
   where
     createAndApply tip =
-        createMainBlockInternal pm sId pske >>= \case
+        createMainBlockInternal genesisConfig sId pske >>= \case
             Left reason -> pure (tip, Left reason)
-            Right blk -> convertRes <$> applyCreatedBlock pm txpConfig pske blk
+            Right blk -> convertRes <$> applyCreatedBlock genesisConfig txpConfig pske blk
     convertRes createdBlk = (headerHash createdBlk, Right createdBlk)
 
 ----------------------------------------------------------------------------
@@ -255,36 +259,38 @@ createMainBlockInternal ::
        forall ctx m.
        ( MonadCreateBlock ctx m
        )
-    => ProtocolMagic
+    => Genesis.Config
     -> SlotId
     -> ProxySKBlockInfo
     -> m (Either Text MainBlock)
-createMainBlockInternal pm sId pske = do
+createMainBlockInternal genesisConfig sId pske = do
     tipHeader <- DB.getTipHeader
     logInfoS $ sformat msgFmt tipHeader
-    canCreateBlock sId tipHeader >>= \case
+    canCreateBlock k sId tipHeader >>= \case
         Left reason -> pure (Left reason)
         Right () -> runExceptT (createMainBlockFinish tipHeader)
   where
+    k = configBlkSecurityParam genesisConfig
     msgFmt = "We are trying to create main block, our tip header is\n"%build
     createMainBlockFinish :: BlockHeader -> ExceptT Text m MainBlock
     createMainBlockFinish prevHeader = do
-        rawPay <- lift $ getRawPayload (headerHash prevHeader) sId
+        rawPay <- lift $ getRawPayload genesisConfig (headerHash prevHeader) sId
         sk <- getOurSecretKey
         -- 100 bytes is substracted to account for different unexpected
         -- overhead.  You can see that in bitcoin blocks are 1-2kB less
         -- than limit. So i guess it's fine in general.
         sizeLimit <- (\x -> bool 0 (x - 100) (x > 100)) <$> lift getMaxBlockSize
-        block <- createMainBlockPure pm sizeLimit prevHeader pske sId sk rawPay
+        block <- createMainBlockPure genesisConfig sizeLimit prevHeader pske sId sk rawPay
         logInfoS $
             "Created main block of size: " <> sformat memory (biSize block)
         block <$ evaluateNF_ block
 
 canCreateBlock :: MonadCreateBlock ctx m
-    => SlotId
+    => BlockCount
+    -> SlotId
     -> BlockHeader
     -> m (Either Text ())
-canCreateBlock sId tipHeader =
+canCreateBlock k sId tipHeader =
     runExceptT $ do
         unlessM (lift usCanCreateBlock) $
             throwError "this software is obsolete and can't create block"
@@ -292,19 +298,19 @@ canCreateBlock sId tipHeader =
             throwError "slot id is not greater than one from the tip block"
         unless (tipHeader ^. epochIndexL == siEpoch sId) $
             throwError "we don't know genesis block for this epoch"
-        let flatSId = flattenSlotId sId
+        let flatSId = flattenSlotId (kEpochSlots k) sId
         -- Small heuristic: let's not check chain quality during the
         -- first quarter of the 0-th epoch, because during this time
         -- weird things can happen (we just launched the system) and
         -- usually we monitor it manually anyway.
-        unless (flatSId <= fromIntegral (epochSlots `div` 4)) $ do
-            chainQualityMaybe <- calcChainQualityM flatSId
+        unless (flatSId <= fromIntegral (kEpochSlots k `div` 4)) $ do
+            chainQualityMaybe <- calcChainQualityM k flatSId
             chainQuality <-
                 maybe
                     (throwError "can't compute chain quality")
                     pure
                     chainQualityMaybe
-            unless (chainQuality >= chainQualityThreshold @Double) $
+            unless (chainQuality >= kChainQualityThreshold @Double k) $
                 throwError $
                 sformat
                     ("chain quality is below threshold: "%fixed 3)
@@ -314,9 +320,9 @@ canCreateBlock sId tipHeader =
     tipEOS = getEpochOrSlot tipHeader
 
 createMainBlockPure
-    :: forall m.
-       ( MonadError Text m, HasUpdateConfiguration, HasProtocolConstants )
-    => ProtocolMagic
+    :: forall m ctx.
+       (MonadError Text m, MonadReader ctx m, HasLens' ctx UpdateConfiguration)
+    => Genesis.Config
     -> Byte                   -- ^ Block size limit (real max.value)
     -> BlockHeader
     -> ProxySKBlockInfo
@@ -324,20 +330,23 @@ createMainBlockPure
     -> SecretKey
     -> RawPayload
     -> m MainBlock
-createMainBlockPure pm limit prevHeader pske sId sk rawPayload = do
-    bodyLimit <- execStateT computeBodyLimit limit
-    body <- createMainBody bodyLimit sId rawPayload
-    pure (mkMainBlock pm bv sv (Right prevHeader) sId sk pske body)
+createMainBlockPure genesisConfig limit prevHeader pske sId sk rawPayload = do
+    uc <- view (lensOf @UpdateConfiguration)
+    bodyLimit <- execStateT (computeBodyLimit uc) limit
+    body <- createMainBody k bodyLimit sId rawPayload
+    pure (mkMainBlock pm (bv uc) (sv uc) (Right prevHeader) sId sk pske body)
   where
+    k = configBlkSecurityParam genesisConfig
+    pm = configProtocolMagic genesisConfig
     -- default ssc to put in case we won't fit a normal one
     defSsc :: SscPayload
-    defSsc = defaultSscPayload (siSlot sId)
-    computeBodyLimit :: StateT Byte m ()
-    computeBodyLimit = do
+    defSsc = defaultSscPayload k (siSlot sId)
+    computeBodyLimit :: UpdateConfiguration -> StateT Byte m ()
+    computeBodyLimit uc = do
         -- account for block header and serialization overhead, etc;
         let musthaveBody = BC.MainBody emptyTxPayload defSsc def def
         let musthaveBlock =
-                mkMainBlock pm bv sv (Right prevHeader) sId sk pske musthaveBody
+                mkMainBlock pm (bv uc) (sv uc) (Right prevHeader) sId sk pske musthaveBody
         let mhbSize = biSize musthaveBlock
         when (mhbSize > limit) $ throwError $
             "Musthave block size is more than limit: " <> show mhbSize
@@ -356,40 +365,37 @@ createMainBlockPure pm limit prevHeader pske sId sk rawPayload = do
 -- the block we applied (usually it's the same as the argument, but
 -- can differ if verification fails).
 applyCreatedBlock ::
-      forall ctx m.
-    ( MonadBlockApply ctx m
-    , MonadCreateBlock ctx m
-    )
-    => ProtocolMagic
+       forall ctx m.
+       (MonadBlockApply ctx m, MonadCreateBlock ctx m)
+    => Genesis.Config
     -> TxpConfiguration
     -> ProxySKBlockInfo
     -> MainBlock
     -> m MainBlock
-applyCreatedBlock pm txpConfig pske createdBlock = applyCreatedBlockDo False createdBlock
+applyCreatedBlock genesisConfig txpConfig pske createdBlock = applyCreatedBlockDo False createdBlock
   where
+    epochSlots = configEpochSlots genesisConfig
     slotId = createdBlock ^. BC.mainBlockSlot
     applyCreatedBlockDo :: Bool -> MainBlock -> m MainBlock
     applyCreatedBlockDo isFallback blockToApply = do
-        ctx <- getVerifyBlocksContext
-        verifyBlocksPrefix pm ctx (one (Right blockToApply)) >>= \case
+        curSlot <- getCurrentSlot epochSlots
+        verifyBlocksPrefix genesisConfig curSlot (one (Right blockToApply)) >>= \case
             Left (pretty -> reason)
                 | isFallback -> onFailedFallback reason
                 | otherwise -> fallback reason
             Right (undos, pollModifier) -> do
                 let undo = undos ^. _Wrapped . _neHead
                 applyBlocksUnsafe
-                    pm
-                    (vbcBlockVersion ctx)
-                    (vbcBlockVersionData ctx)
+                    genesisConfig
                     (ShouldCallBListener True)
                     (one (Right blockToApply, undo))
                     (Just pollModifier)
-                normalizeMempool pm txpConfig
+                normalizeMempool genesisConfig txpConfig
                 pure blockToApply
     clearMempools :: m ()
     clearMempools = do
         withTxpLocalData clearTxpMemPool
-        sscResetLocal
+        sscResetLocal epochSlots
         clearUSMemPool
         clearDlgMemPool
     fallback :: Text -> m MainBlock
@@ -400,7 +406,7 @@ applyCreatedBlock pm txpConfig pske createdBlock = applyCreatedBlockDo False cre
         logDebug $ "Clearing mempools"
         clearMempools
         logDebug $ "Creating empty block"
-        createMainBlockInternal pm slotId pske >>= \case
+        createMainBlockInternal genesisConfig slotId pske >>= \case
             Left err ->
                 assertionFailed $
                 sformat ("Couldn't create a block in fallback: "%stext) err
@@ -422,13 +428,14 @@ data RawPayload = RawPayload
     }
 
 getRawPayload :: MonadCreateBlock ctx m
-    => HeaderHash
+    => Genesis.Config
+    -> HeaderHash
     -> SlotId
     -> m RawPayload
-getRawPayload tip slotId = do
+getRawPayload genesisConfig tip slotId = do
     localTxs <- txGetPayload tip -- result is topsorted
-    sscData <- sscGetLocalPayload slotId
-    usPayload <- usPreparePayload tip slotId
+    sscData <- sscGetLocalPayload (configBlkSecurityParam genesisConfig) slotId
+    usPayload <- usPreparePayload (configBlockVersionData genesisConfig) tip slotId
     dlgPayload <- getDlgMempool
     let rawPayload =
             RawPayload
@@ -446,15 +453,16 @@ getRawPayload tip slotId = do
 -- Given limit applies only to body, not to other data from block.
 createMainBody
     :: forall m .
-       ( MonadError Text m, HasProtocolConstants )
-    => Byte  -- ^ Body limit
+       MonadError Text m
+    => BlockCount
+    -> Byte  -- ^ Body limit
     -> SlotId
     -> RawPayload
-    -> m (Body MainBlockchain)
-createMainBody bodyLimit sId payload =
+    -> m MainBody
+createMainBody k bodyLimit sId payload =
     flip evalStateT bodyLimit $ do
         let defSsc :: SscPayload
-            defSsc = defaultSscPayload (siSlot sId)
+            defSsc = defaultSscPayload k (siSlot sId)
         -- include ssc data limited with max half of block space if it's possible
         sscPayload <- ifM (uses identity (<= biSize defSsc)) (pure defSsc) $ do
             halfLeft <- uses identity (`div` 2)
@@ -467,7 +475,7 @@ createMainBody bodyLimit sId payload =
                 pure sscP
 
         -- include delegation certificates and US payload
-        let prioritizeUS = even (flattenSlotId sId)
+        let prioritizeUS = even (flattenSlotId (kEpochSlots k) sId)
         let psks = getDlgPayload dlgPay
         (psks', usPayload') <-
             if prioritizeUS then do

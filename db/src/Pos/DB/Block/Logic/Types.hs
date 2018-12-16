@@ -1,3 +1,5 @@
+{-# LANGUAGE RecordWildCards #-}
+
 module Pos.DB.Block.Logic.Types
     ( VerifyBlocksContext (..)
     , getVerifyBlocksContext
@@ -6,8 +8,9 @@ module Pos.DB.Block.Logic.Types
 
 import           Universum
 
-import           Pos.Core.Slotting (MonadSlots (getCurrentSlot), SlotId)
-import           Pos.Core.Update (BlockVersion, BlockVersionData)
+import           Pos.Chain.Update (BlockVersion, BlockVersionData)
+import           Pos.Core.Slotting (MonadSlots (getCurrentSlot), SlotCount,
+                     SlotId)
 import           Pos.DB.Class (MonadDBRead)
 import           Pos.DB.Update (getAdoptedBVFull)
 
@@ -27,9 +30,10 @@ getVerifyBlocksContext
        ( MonadDBRead m
        , MonadSlots ctx m
        )
-    => m VerifyBlocksContext
-getVerifyBlocksContext =
-    getCurrentSlot >>= getVerifyBlocksContext'
+    => SlotCount
+    -> m VerifyBlocksContext
+getVerifyBlocksContext epochSlots =
+    getCurrentSlot epochSlots >>= getVerifyBlocksContext'
 
 getVerifyBlocksContext'
     :: MonadDBRead m
@@ -38,4 +42,3 @@ getVerifyBlocksContext'
 getVerifyBlocksContext' vbcCurrentSlot = do
     (vbcBlockVersion, vbcBlockVersionData) <- getAdoptedBVFull
     return $ VerifyBlocksContext {..}
-

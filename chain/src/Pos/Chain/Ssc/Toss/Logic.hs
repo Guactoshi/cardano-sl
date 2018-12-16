@@ -1,3 +1,5 @@
+{-# LANGUAGE RecordWildCards #-}
+
 -- | Main Toss logic.
 
 module Pos.Chain.Ssc.Toss.Logic
@@ -14,58 +16,64 @@ import           Control.Lens (at)
 import           Control.Monad.Except (MonadError, runExceptT, throwError)
 import           Crypto.Random (MonadRandom)
 import qualified Data.HashMap.Strict as HM
-import           System.Wlog (logError)
 
+import           Pos.Chain.Block.IsHeader (IsMainHeader, headerSlotL)
+import           Pos.Chain.Genesis as Genesis (Config (..),
+                     configSlotSecurityParam)
+import           Pos.Chain.Ssc.Commitment (SignedCommitment)
+import           Pos.Chain.Ssc.CommitmentsMap (CommitmentsMap (..),
+                     getCommitmentsMap, mkCommitmentsMapUnsafe)
 import           Pos.Chain.Ssc.Error (SscVerifyError (..))
 import           Pos.Chain.Ssc.Functions (verifySscPayload)
+import           Pos.Chain.Ssc.Opening (Opening)
+import           Pos.Chain.Ssc.Payload (SscPayload (..), checkSscPayload, spVss)
+import           Pos.Chain.Ssc.SharesMap (InnerSharesMap)
 import           Pos.Chain.Ssc.Toss.Base (checkPayload)
 import           Pos.Chain.Ssc.Toss.Class (MonadToss (..), MonadTossEnv (..))
 import           Pos.Chain.Ssc.Toss.Types (TossModifier (..))
-import           Pos.Core (EpochIndex, EpochOrSlot (..), HasProtocolConstants,
-                     LocalSlotIndex, SlotCount, SlotId (siSlot), StakeholderId,
-                     epochIndexL, epochOrSlot, getEpochOrSlot, mkCoin,
-                     slotSecurityParam)
-import           Pos.Core.Block (IsMainHeader, headerSlotL)
+import           Pos.Chain.Ssc.VssCertificate (VssCertificate)
+import           Pos.Chain.Ssc.VssCertificatesMap (getVssCertificatesMap,
+                     mkVssCertificatesMapSingleton)
+import           Pos.Core (EpochIndex, EpochOrSlot (..), LocalSlotIndex,
+                     SlotCount, SlotId (siSlot), StakeholderId, epochIndexL,
+                     epochOrSlot, epochOrSlotPred, epochOrSlotToEnum,
+                     getEpochOrSlot, getSlotIndex, mkCoin)
 import           Pos.Core.Chrono (NewestFirst (..))
-import           Pos.Core.Ssc (CommitmentsMap (..), InnerSharesMap, Opening,
-                     SignedCommitment, SscPayload (..), VssCertificate,
-                     checkSscPayload, getCommitmentsMap, getVssCertificatesMap,
-                     mkCommitmentsMapUnsafe, mkVssCertificatesMapSingleton,
-                     spVss)
-import           Pos.Crypto (ProtocolMagic)
 import           Pos.Util.AssertMode (inAssertMode)
 import           Pos.Util.Some (Some)
 import           Pos.Util.Util (sortWithMDesc)
+import           Pos.Util.Wlog (logError)
 
 -- | Verify 'SscPayload' with respect to data provided by
 -- MonadToss. If data is valid it is also applied.  Otherwise
 -- SscVerifyError is thrown using 'MonadError' type class.
 verifyAndApplySscPayload
-    :: ( HasProtocolConstants
+    :: ( MonadToss m
+       , MonadTossEnv m
        , MonadError SscVerifyError m
        , MonadRandom m
-       , MonadToss m
-       , MonadTossEnv m
        )
-    => ProtocolMagic
+    => Genesis.Config
     -> Either EpochIndex (Some IsMainHeader)
     -> SscPayload
     -> m ()
-verifyAndApplySscPayload pm eoh payload = do
+verifyAndApplySscPayload genesisConfig eoh payload = do
     -- Check the payload for internal consistency.
-    either (throwError . SscInvalidPayload) pure (checkSscPayload pm payload)
+    either (throwError . SscInvalidPayload)
+           pure
+           (checkSscPayload (configProtocolMagic genesisConfig) payload)
     -- We can't trust payload from mempool, so we must call
     -- @verifySscPayload@.
-    whenLeft eoh $ const $ verifySscPayload pm eoh payload
+    whenLeft eoh $ const $ verifySscPayload genesisConfig eoh payload
     -- We perform @verifySscPayload@ for block when we construct it
     -- (in the 'recreateGenericBlock').  So this check is just in case.
     -- NOTE: in block verification `verifySscPayload` on `MainBlock` is run
     -- by `Pos.Block.BHelper.verifyMainBlock`
     inAssertMode $
-        whenRight eoh $ const $ verifySscPayload pm eoh payload
+        whenRight eoh $ const $ verifySscPayload genesisConfig eoh payload
     let blockCerts = spVss payload
     let curEpoch = either identity (^. epochIndexL) eoh
-    checkPayload curEpoch payload
+    checkPayload genesisConfig curEpoch payload
 
     -- Apply
     case eoh of
@@ -77,8 +85,9 @@ verifyAndApplySscPayload pm eoh payload = do
             -- it's guaranteed that rollback on more than 'slotSecurityParam'
             -- can't happen
             let indexToCount :: LocalSlotIndex -> SlotCount
-                indexToCount = fromIntegral . fromEnum
+                indexToCount = fromIntegral . getSlotIndex
             let slot = epochOrSlot (const 0) (indexToCount . siSlot) eos
+                slotSecurityParam = configSlotSecurityParam genesisConfig
             when (slotSecurityParam <= slot && slot < 2 * slotSecurityParam) $
                 resetShares
     mapM_ putCertificate blockCerts
@@ -105,18 +114,20 @@ applyGenesisBlock epoch = do
 
 -- | Rollback application of 'SscPayload's in 'Toss'. First argument is
 -- 'EpochOrSlot' of oldest block which is subject to rollback.
-rollbackSsc :: (MonadToss m, HasProtocolConstants) =>
-    EpochOrSlot
+rollbackSsc
+    :: MonadToss m
+    => SlotCount
+    -> EpochOrSlot
     -> NewestFirst [] SscPayload
     -> m ()
-rollbackSsc oldestEOS (NewestFirst payloads)
-    | oldestEOS == toEnum 0 = do
+rollbackSsc epochSlots oldestEOS (NewestFirst payloads)
+    | oldestEOS == epochOrSlotToEnum epochSlots 0 = do
         logError "rollbackSsc: most genesis block is passed to rollback"
         setEpochOrSlot oldestEOS
         resetCO
         resetShares
     | otherwise = do
-        setEpochOrSlot (pred oldestEOS)
+        setEpochOrSlot (epochOrSlotPred epochSlots oldestEOS)
         mapM_ rollbackSscDo payloads
   where
     rollbackSscDo (CommitmentsPayload comms _) =
@@ -127,11 +138,14 @@ rollbackSsc oldestEOS (NewestFirst payloads)
 
 -- | Apply as much data from given 'TossModifier' as possible.
 normalizeToss
-    :: (MonadToss m, MonadTossEnv m, MonadRandom m, HasProtocolConstants)
-    => ProtocolMagic -> EpochIndex -> TossModifier -> m ()
-normalizeToss pm epoch TossModifier {..} =
+    :: (MonadToss m, MonadTossEnv m, MonadRandom m)
+    => Genesis.Config
+    -> EpochIndex
+    -> TossModifier
+    -> m ()
+normalizeToss genesisConfig epoch TossModifier {..} =
     normalizeTossDo
-        pm
+        genesisConfig
         epoch
         ( HM.toList (getCommitmentsMap _tmCommitments)
         , HM.toList _tmOpenings
@@ -141,15 +155,18 @@ normalizeToss pm epoch TossModifier {..} =
 -- | Apply the most valuable from given 'TossModifier' and drop the
 -- rest. This function can be used if mempool is exhausted.
 refreshToss
-    :: (MonadToss m, MonadTossEnv m, MonadRandom m, HasProtocolConstants)
-    => ProtocolMagic -> EpochIndex -> TossModifier -> m ()
-refreshToss pm epoch TossModifier {..} = do
+    :: (MonadToss m, MonadTossEnv m, MonadRandom m)
+    => Genesis.Config
+    -> EpochIndex
+    -> TossModifier
+    -> m ()
+refreshToss genesisConfig epoch TossModifier {..} = do
     comms <-
         takeMostValuable epoch (HM.toList (getCommitmentsMap _tmCommitments))
     opens <- takeMostValuable epoch (HM.toList _tmOpenings)
     shares <- takeMostValuable epoch (HM.toList _tmShares)
     certs <- takeMostValuable epoch (HM.toList (getVssCertificatesMap _tmCertificates))
-    normalizeTossDo pm epoch (comms, opens, shares, certs)
+    normalizeTossDo genesisConfig epoch (comms, opens, shares, certs)
 
 takeMostValuable
     :: (MonadToss m, MonadTossEnv m)
@@ -170,10 +187,13 @@ type TossModifierLists
        , [(StakeholderId, VssCertificate)])
 
 normalizeTossDo
-    :: forall m.
-       (MonadToss m, MonadTossEnv m, MonadRandom m, HasProtocolConstants)
-    => ProtocolMagic -> EpochIndex -> TossModifierLists -> m ()
-normalizeTossDo pm epoch (comms, opens, shares, certs) = do
+    :: forall m
+     . (MonadToss m, MonadTossEnv m, MonadRandom m)
+    => Genesis.Config
+    -> EpochIndex
+    -> TossModifierLists
+    -> m ()
+normalizeTossDo genesisConfig epoch (comms, opens, shares, certs) = do
     putsUseful $
         map (flip CommitmentsPayload mempty . mkCommitmentsMapUnsafe . one) $
         comms
@@ -183,5 +203,6 @@ normalizeTossDo pm epoch (comms, opens, shares, certs) = do
   where
     putsUseful :: [SscPayload] -> m ()
     putsUseful entries = do
-        let verifyAndApply = runExceptT . verifyAndApplySscPayload pm (Left epoch)
+        let verifyAndApply = runExceptT . verifyAndApplySscPayload genesisConfig
+                                                                   (Left epoch)
         mapM_ verifyAndApply entries

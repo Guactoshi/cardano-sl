@@ -9,6 +9,9 @@ environment:
     STACK_ROOT: "c:\\s"
     STACK_WORK: ".w"
     WORK_DIR: "c:\\w"
+    # Override the temp directory to avoid sed escaping issues
+    # See https://github.com/haskell/cabal/issues/5386
+    TMP: "c:\\tmp"
     CACHE_S3_VERSION: v0.1.4
     CACHE_S3_MAX_SIZE: 1600MB  # AppVeyor limits the amount uploaded to approx 2GB
     AWS_REGION: us-west-1
@@ -54,16 +57,16 @@ before_test:
 - ps: >-
     mkdir C:\ghc
 
-    Invoke-WebRequest "https://s3.eu-central-1.amazonaws.com/ci-static/ghc-8.2.2-x86_64-unknown-mingw32.tar.xz" -OutFile "C:\ghc\ghc.tar.xz" -UserAgent "Curl"
+    Invoke-WebRequest "https://s3.eu-central-1.amazonaws.com/ci-static/ghc-8.4.4-x86_64-unknown-mingw32-20181113-b907eb0f9b.tar.xz" -OutFile "C:\ghc\ghc.tar.xz" -UserAgent "Curl"
 
     7z x C:\ghc\ghc.tar.xz -oC:\ghc
 
     7z x C:\ghc\ghc.tar -oC:\ghc
 
-    $env:PATH="$env:PATH;C:\ghc\ghc-8.2.2\bin"
+    $env:PATH="$env:PATH;C:\ghc\ghc-8.4.4\bin"
 
 # Install OpenSSL 1.0.2 (see https://github.com/appveyor/ci/issues/1665)
-- ps: (New-Object Net.WebClient).DownloadFile('https://slproweb.com/download/Win64OpenSSL-1_0_2o.exe', "$($env:USERPROFILE)\Win64OpenSSL.exe")
+- ps: (New-Object Net.WebClient).DownloadFile('https://slproweb.com/download/Win64OpenSSL-1_0_2q.exe', "$($env:USERPROFILE)\Win64OpenSSL.exe")
 - ps: cmd /c start /wait "$($env:USERPROFILE)\Win64OpenSSL.exe" /silent /verysilent /sp- /suppressmsgboxes /DIR=C:\OpenSSL-Win64-v102
 - ps: Install-Product node 6
 # Install stack
@@ -81,7 +84,6 @@ before_test:
 - copy rocksdb.dll node
 - copy rocksdb.dll lib
 - copy rocksdb.dll wallet
-- copy rocksdb.dll wallet-new
 
 # Install liblzma/xz
 - ps: Start-FileDownload https://tukaani.org/xz/xz-5.2.3-windows.zip -Filename xz-5.2.3-windows.zip
@@ -103,25 +105,26 @@ test_script:
       --extra-lib-dirs="C:\xz_extracted\bin_x86-64"
       --extra-include-dirs="%WORK_DIR%\rocksdb\include"
       --extra-lib-dirs="%WORK_DIR%"
+      --ghc-options="-copy-libs-when-linking"
 #   TODO: CSL-1133. To be reenabled.
 #   - stack test --coverage
 #   - stack hpc report cardano-sl cardano-sl-txp cardano-sl-core cardano-sl-db cardano-sl-update cardano-sl-infra cardano-sl-lrc cardano-sl-ssc
 # Retry transient failures due to https://github.com/haskell/cabal/issues/4005
   # We intentionally don't build auxx here, because this build is for installer.
-  - scripts\ci\appveyor-retry call stack --dump-logs install cardano-sl cardano-sl-tools cardano-sl-wallet cardano-sl-wallet-new
+  - scripts\ci\appveyor-retry call stack --dump-logs install cardano-sl cardano-sl-tools cardano-wallet
       -j 3
       --no-terminal
       --local-bin-path %WORK_DIR%
       --no-haddock-deps
       --flag cardano-sl-core:-asserts
       --flag cardano-sl-tools:for-installer
-      --flag cardano-sl-wallet:for-installer
       --extra-include-dirs="C:\OpenSSL-Win64-v102\include"
       --extra-lib-dirs="C:\OpenSSL-Win64-v102"
       --extra-include-dirs="C:\xz_extracted\include"
       --extra-lib-dirs="C:\xz_extracted\bin_x86-64"
       --extra-include-dirs="%WORK_DIR%\rocksdb\include"
       --extra-lib-dirs="%WORK_DIR%"
+      --ghc-options="-copy-libs-when-linking"
   # Cardano pieces, modulo the frontend
   - mkdir daedalus
     # log config is called `log-config-prod.yaml` just in case, it's the old name

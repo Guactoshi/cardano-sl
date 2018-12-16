@@ -6,8 +6,8 @@ module Test.Pos.ConstantsSpec
 
 import           Universum
 
-import           Pos.Chain.Update (HasUpdateConfiguration, ourSystemTag)
-import           Pos.Core.Update (SystemTag (..))
+import           Pos.Chain.Update (HasUpdateConfiguration, SystemTag (..),
+                     ourSystemTag, updateConfiguration)
 
 import           Test.Hspec (Expectation, Spec, describe, it, shouldSatisfy)
 import           Test.Pos.Configuration (withDefUpdateConfiguration)
@@ -22,7 +22,7 @@ systemTagCheck :: HasUpdateConfiguration => Expectation
 systemTagCheck = do
     let sysTags = map SystemTag ["linux64", "macos64", "win64"]
         felem = flip elem
-    ourSystemTag `shouldSatisfy` felem sysTags
+    ourSystemTag updateConfiguration `shouldSatisfy` felem sysTags
 
 spec :: Spec
 spec = withDefUpdateConfiguration $ describe "Constants" $ do

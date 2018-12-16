@@ -1,5 +1,5 @@
 name:                cardano-sl-generator
-version:             1.3.0
+version:             2.0.0
 synopsis:            Cardano SL - arbitrary data generation
 description:         Cardano SL - arbitrary data generation
 license:             MIT
@@ -40,11 +40,11 @@ library
                      , bytestring
                      , cardano-sl
                      , cardano-sl-chain
+                     , cardano-sl-chain-test
                      , cardano-sl-client
                      , cardano-sl-core
                      , cardano-sl-core-test
                      , cardano-sl-crypto
-                     , cardano-sl-crypto-test
                      , cardano-sl-db
                      , cardano-sl-infra
                      , cardano-sl-util
@@ -55,7 +55,6 @@ library
                      , exceptions
                      , formatting
                      , lens
-                     , log-warper
                      , monad-control
                      , random
                      , safe-exceptions
@@ -81,7 +80,6 @@ library
                        DefaultSignatures
                        NoImplicitPrelude
                        OverloadedStrings
-                       RecordWildCards
                        TypeApplications
                        TupleSections
                        ViewPatterns
@@ -125,9 +123,7 @@ test-suite cardano-generator-test
                      , cardano-sl-chain
                      , cardano-sl-chain-test
                      , cardano-sl-core
-                     , cardano-sl-core-test
                      , cardano-sl-crypto
-                     , cardano-sl-crypto-test
                      , cardano-sl-db
                      , cardano-sl-generator
                      , cardano-sl-util
@@ -141,6 +137,7 @@ test-suite cardano-generator-test
                      , serokell-util
                      , universum >= 0.1.11
                      , unordered-containers
+  build-tool-depends: hspec-discover:hspec-discover
 
   hs-source-dirs:      test
   default-language:    Haskell2010
@@ -164,7 +161,6 @@ test-suite cardano-generator-test
                         DefaultSignatures
                         NoImplicitPrelude
                         OverloadedStrings
-                        RecordWildCards
                         TypeApplications
                         TupleSections
                         ViewPatterns
@@ -186,34 +182,19 @@ benchmark cardano-sl-verification-bench
   main-is:              Main.hs
   other-modules:        Bench.Pos.Criterion.Block.Logic
   type:                 exitcode-stdio-1.0
-  build-depends:        async
-                      , base
+  build-depends:        base
                       , cardano-sl
-                      , cardano-sl-binary
                       , cardano-sl-chain
                       , cardano-sl-core
                       , cardano-sl-crypto
                       , cardano-sl-db
                       , cardano-sl-generator
-                      , cardano-sl-infra
-                      , cardano-sl-networking
                       , cardano-sl-util
-                      , containers
                       , criterion
-                      , cryptonite
-                      , data-default
-                      , ether
-                      , lens
-                      , log-warper
-                      , lrucache
                       , MonadRandom
-                      , mtl
-                      , QuickCheck
                       , random
                       , time-units
                       , universum >= 0.1.11
-                      , unliftio-core
-                      , unordered-containers
                       , serokell-util
   default-language:     Haskell2010
   ghc-options:          -threaded
@@ -234,7 +215,6 @@ benchmark cardano-sl-verification-bench
                         DefaultSignatures
                         NoImplicitPrelude
                         OverloadedStrings
-                        RecordWildCards
                         TypeApplications
                         TypeFamilies
                         TupleSections
@@ -254,8 +234,7 @@ benchmark cardano-sl-verification-bench
 executable cardano-sl-verification-bench-exe
   hs-source-dirs:       app
   main-is:              VerificationBench.hs
-  build-depends:        async
-                      , base
+  build-depends:        base
                       , bytestring
                       , cardano-sl
                       , cardano-sl-binary
@@ -264,30 +243,17 @@ executable cardano-sl-verification-bench-exe
                       , cardano-sl-crypto
                       , cardano-sl-db
                       , cardano-sl-generator
-                      , cardano-sl-infra
-                      , cardano-sl-networking
                       , cardano-sl-util
                       , containers
-                      , criterion
-                      , cryptonite
-                      , data-default
                       , deepseq
                       , directory
-                      , ether
                       , formatting
-                      , lens
-                      , log-warper
-                      , lrucache
                       , MonadRandom
-                      , mtl
                       , optparse-applicative
-                      , QuickCheck
                       , random
                       , text
                       , time-units
                       , universum >= 0.1.11
-                      , unliftio-core
-                      , unordered-containers
   default-language:     Haskell2010
   ghc-options:        -threaded
                       -rtsopts
@@ -308,7 +274,6 @@ executable cardano-sl-verification-bench-exe
                         DefaultSignatures
                         NoImplicitPrelude
                         OverloadedStrings
-                        RecordWildCards
                         TypeApplications
                         TypeFamilies
                         TupleSections

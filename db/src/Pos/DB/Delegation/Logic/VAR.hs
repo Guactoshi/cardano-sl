@@ -1,4 +1,5 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
+{-# LANGUAGE RecordWildCards     #-}
 {-# LANGUAGE TypeFamilies        #-}
 
 -- | Delegation-related verify/apply/rollback part.
@@ -22,23 +23,25 @@ import           Data.List ((\\))
 import           Formatting (bprint, build, sformat, (%))
 import qualified Formatting.Buildable as B
 import           Serokell.Util (listJson, mapJson)
-import           System.Wlog (WithLogger, logDebug)
 import           UnliftIO (MonadUnliftIO)
 
+import           Pos.Chain.Block (Block, ComponentBlock (..), gbHeader,
+                     headerHash, mainBlockDlgPayload, mainBlockSlot,
+                     prevBlockL)
 import           Pos.Chain.Delegation (CedeModifier (..), DlgBlund,
                      DlgEdgeAction (..), DlgPayload (getDlgPayload),
                      DlgUndo (..), MonadCede (..), MonadCedeRead (..),
                      MonadDelegation, cmPskMods, dlgEdgeActionIssuer,
                      dwProxySKPool, dwTip, emptyCedeModifier, getPskPk, modPsk,
                      pskToDlgEdgeAction)
+import           Pos.Chain.Genesis as Genesis (Config (..),
+                     configBlockVersionData)
 import           Pos.Chain.Lrc (RichmenSet)
+import           Pos.Chain.Update (BlockVersionData)
 import           Pos.Core (EpochIndex (..), StakeholderId, addressHash,
                      epochIndexL, siEpoch)
-import           Pos.Core.Block (Block, ComponentBlock (..), gbHeader,
-                     headerHash, mainBlockDlgPayload, mainBlockSlot,
-                     prevBlockL)
 import           Pos.Core.Chrono (NE, NewestFirst (..), OldestFirst (..))
-import           Pos.Crypto (ProtocolMagic, ProxySecretKey (..), shortHashF)
+import           Pos.Crypto (ProxySecretKey (..), shortHashF)
 import           Pos.DB (DBError (DBMalformed), MonadDBRead, SomeBatchOp (..))
 import qualified Pos.DB as DB
 import           Pos.DB.Delegation.Cede.Holders (MapCede, evalMapCede,
@@ -54,6 +57,7 @@ import           Pos.DB.Delegation.Logic.Mempool (clearDlgMemPoolAction,
 import qualified Pos.DB.GState.Common as GS
 import           Pos.DB.Lrc (HasLrcContext, getDlgRichmen)
 import           Pos.Util (getKeys, _neHead)
+import           Pos.Util.Wlog (WithLogger, logDebug)
 
 
 -- Copied from 'these' library.
@@ -298,14 +302,15 @@ getNoLongerRichmen ::
        , MonadReader ctx m
        , HasLrcContext ctx
        )
-    => EpochIndex
+    => BlockVersionData
+    -> EpochIndex
     -> m (HashSet StakeholderId)
-getNoLongerRichmen (EpochIndex 0) = pure mempty
-getNoLongerRichmen newEpoch =
+getNoLongerRichmen _ (EpochIndex 0) = pure mempty
+getNoLongerRichmen genesisBvd newEpoch =
     HS.difference <$> getRichmen (newEpoch - 1) <*> getRichmen newEpoch
   where
     getRichmen :: EpochIndex -> m RichmenSet
-    getRichmen = getDlgRichmen "getNoLongerRichmen"
+    getRichmen = getDlgRichmen genesisBvd "getNoLongerRichmen"
 
 -- | Verifies if blocks are correct relatively to the delegation logic
 -- and returns a non-empty list of proxySKs needed for undoing
@@ -324,13 +329,15 @@ dlgVerifyBlocks ::
        , MonadReader ctx m
        , HasLrcContext ctx
        )
-    => ProtocolMagic
+    => Genesis.Config
     -> OldestFirst NE Block
     -> ExceptT Text m (OldestFirst NE DlgUndo)
-dlgVerifyBlocks pm blocks = do
-    richmen <- lift $ getDlgRichmen "dlgVerifyBlocks" headEpoch
+dlgVerifyBlocks genesisConfig blocks = do
+    richmen <- lift $ getDlgRichmen genesisBvd "dlgVerifyBlocks" headEpoch
     hoist (evalMapCede emptyCedeModifier) $ mapM (verifyBlock richmen) blocks
   where
+    genesisBvd = configBlockVersionData genesisConfig
+
     headEpoch = blocks ^. _Wrapped . _neHead . epochIndexL
 
     verifyBlock ::
@@ -341,7 +348,7 @@ dlgVerifyBlocks pm blocks = do
         let blkEpoch = genesisBlk ^. epochIndexL
         prevThisEpochPosted <- getAllPostedThisEpoch
         mapM_ delThisEpochPosted prevThisEpochPosted
-        noLongerRichmen <- lift $ lift $ getNoLongerRichmen blkEpoch
+        noLongerRichmen <- lift $ lift $ getNoLongerRichmen genesisBvd blkEpoch
         deletedPSKs <- catMaybes <$> mapM getPsk (toList noLongerRichmen)
         -- We should delete all certs for people who are not richmen.
         let delFromCede = modPsk . DlgEdgeDel . addressHash . pskIssuerPk
@@ -365,7 +372,7 @@ dlgVerifyBlocks pm blocks = do
                 -- delete/override), apply new psks.
                 toRollback <- fmap catMaybes $ forM proxySKs $ \psk ->do
                     dlgVerifyPskHeavy
-                        pm
+                        (configProtocolMagic genesisConfig)
                         richmen
                         (CheckForCycle False)
                         (blk ^. mainBlockSlot . to siEpoch)
@@ -503,12 +510,12 @@ dlgNormalizeOnRollback ::
        , DB.MonadGState m
        , HasLrcContext ctx
        )
-    => ProtocolMagic -> m ()
-dlgNormalizeOnRollback pm = do
+    => Genesis.Config -> m ()
+dlgNormalizeOnRollback genesisConfig = do
     tip <- DB.getTipHeader
     oldPool <- runDelegationStateAction $ do
         pool <- uses dwProxySKPool toList
         dwProxySKPool .= mempty
         dwTip .= headerHash tip
         pure pool
-    forM_ oldPool $ processProxySKHeavyInternal pm
+    forM_ oldPool $ processProxySKHeavyInternal genesisConfig

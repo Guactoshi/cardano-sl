@@ -42,32 +42,18 @@ Switch to the `master` branch:
 
 ## Nix build mode (recommended)
 
-First, prerequisite: install Nix (full instructions at https://nixos.org/nix/download.html):
+First, install Nix and set up the IOHK binary cache according to
+[these instructions](../nix.md).
 
-    curl https://nixos.org/nix/install | sh
+Actually building the Cardano SL node (or, most likely, simply obtaining it
+from the IOHK's binary caches) can be performed by building the attribute `cardano-sl-node-static`:
 
-Two steps remain, then:
+    $ nix-build -A cardano-sl-node-static --out-link master
 
-1.  To employ the signed IOHK binary cache:
+The build output directory will be symlinked as `master` (as specified by the command), and it will contain:
 
-        $ sudo mkdir -p /etc/nix
-        $ sudo vi /etc/nix/nix.conf       # ..or any other editor, if you prefer
-
-    and then add the following lines:
-
-        substituters = https://hydra.iohk.io https://cache.nixos.org/
-        trusted-substituters =
-        trusted-public-keys = hydra.iohk.io:f/Ea+s+dFdN+3Y/G+FDgSq+a5NEWhJGzdjvKNGv0/EQ= cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=
-
-2.  Actually building the Cardano SL node (or, most likely, simply obtaining it
-    from the IOHK's binary caches) can be performed by building the attribute `cardano-sl-node-static`:
-
-        $ nix-build -A cardano-sl-node-static --cores 0 --max-jobs 2 --no-build-output --out-link master
-
-    The build output directory will be symlinked as `master` (as specified by the command), and it will contain:
-
-        $ ls master/bin
-        cardano-node-simple
+    $ ls master/bin
+    cardano-node-simple
 
 NOTE: the various other Cardano components can be obtained through other attributes:
 
@@ -79,7 +65,7 @@ NOTE: the various other Cardano components can be obtained through other attribu
    - `cardano-explorer`, `cardano-explorer-swagger`, `cardano-explorer-mock`
 -  `cardano-sl-tools`:
    - `cardano-analyzer`, `cardano-dht-keygen`, `cardano-genupdate`, `cardano-keygen`, `cardano-launcher`, `cardano-addr-convert`, `cardano-cli-docs`, `cardano-block-gen`, `cardano-post-mortem`
--  `cardano-sl-wallet-static`:
+-  `cardano-wallet-static`:
    - `cardano-node`, `cardano-swagger`
 
 In general, for any given cabal `PACKAGE` provided by Cardano, there is a
@@ -166,6 +152,39 @@ Run the building script:
 
     $ cd cardano-sl
     [~/cardano-sl]$ ./scripts/build/cardano-sl.sh
+
+## `cabal new-build` and Nix (experimental, for developers)
+
+This type of build gives you a multi-package project with incremental
+builds, where the all of the build dependencies (Haskell packages and
+system libraries) are downloaded from the binary cache and available
+in the shell.
+
+See the previous section on how to set up the IOHK binary cache.
+
+Before you start, install a recent version of `cabal` into your
+profile. The package set used by cardano-sl (nixpkgs 18.03) only has
+cabal 2.0.0.1 which doesn't work.
+
+    [nix-shell:~]$ nix-env -f channel:nixos-18.09 -iA pkgs.cabal-install
+
+Enter the `nix-shell`:
+
+    [nix-shell:~/cardano-sl]$ nix-shell
+
+Then build all cardano-sl packages:
+
+    [nix-shell:~/cardano-sl]$ cabal new-build all
+
+All dependencies necessary for the Cabal build are provided by the
+`nix-shell`. The package versions are pinned in the
+`cabal.project.freeze` file, which is automatically generated from
+`stack.yaml` (via `stack2nix`).
+
+To start a GHCi session for a component (wallet for example), run:
+
+    [nix-shell:~/cardano-sl]$ cabal new-repl cardano-wallet
+
 
 ## Daedalus Wallet
 

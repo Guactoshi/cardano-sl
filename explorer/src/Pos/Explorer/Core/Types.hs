@@ -8,10 +8,10 @@ module Pos.Explorer.Core.Types
 import           Universum
 
 import           Pos.Binary.Class (Cons (..), Field (..), deriveSimpleBi)
+import           Pos.Chain.Block (HeaderHash)
+import           Pos.Chain.Txp (TxId, TxUndo)
 import           Pos.Core (Timestamp)
-import           Pos.Core.Block (HeaderHash)
 import           Pos.Core.Chrono (NewestFirst)
-import           Pos.Core.Txp (TxId, TxUndo)
 
 type AddrHistory = NewestFirst [] TxId
 

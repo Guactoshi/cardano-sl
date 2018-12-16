@@ -1,6 +1,7 @@
-{-# LANGUAGE DataKinds     #-}
-{-# LANGUAGE TypeFamilies  #-}
-{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE DataKinds       #-}
+{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE TypeFamilies    #-}
+{-# LANGUAGE TypeOperators   #-}
 
 -- | Web server.
 
@@ -9,7 +10,9 @@ module Pos.Web.Server
        , serveDocImpl
        , withRoute53HealthCheckApplication
        , serveWeb
+       , servantServer
        , application
+       , nodeServantHandlers
        ) where
 
 import           Universum
@@ -19,7 +22,7 @@ import qualified Control.Exception.Safe as E
 import           Control.Monad.Except (MonadError (throwError))
 import qualified Control.Monad.Reader as Mtl
 import qualified Data.ByteString.Char8 as BSC
-import           Data.Default (Default, def)
+import           Data.Default (def)
 import           Data.Streaming.Network (bindPortTCP, bindRandomPortTCP)
 import           Data.X509 (ExtKeyUsagePurpose (..), HashALG (..))
 import           Data.X509.CertificateStore (readCertificateStore)
@@ -35,24 +38,19 @@ import           Network.Wai.Handler.WarpTLS (TLSSettings (..), runTLSSocket,
                      tlsSettingsChain)
 import           Servant.API ((:<|>) ((:<|>)))
 import           Servant.Server (Handler, HasServer, ServantErr (errBody),
-                     Server, ServerT, err404, err503, hoistServer, serve)
+                     Server, ServerT, err503, hoistServer, serve)
 import           UnliftIO (MonadUnliftIO)
 
 import           Network.Socket (Socket, close)
-import           Pos.Chain.Ssc (scParticipateSsc)
-import           Pos.Chain.Txp (TxOut (..), toaOut)
-import           Pos.Chain.Update (HasUpdateConfiguration)
-import           Pos.Context (HasNodeContext (..), HasSscContext (..),
-                     NodeContext, getOurPublicKey)
-import           Pos.Core (EpochIndex (..), SlotLeaders)
-import           Pos.Core.Configuration (HasConfiguration)
+import           Pos.Chain.Update (UpdateConfiguration)
+import           Pos.Context (HasNodeContext (..), NodeContext)
 import           Pos.DB (MonadDBRead)
 import qualified Pos.DB as DB
-import qualified Pos.DB.Lrc as LrcDB
 import           Pos.DB.Txp (GenericTxpLocalData, MempoolExt,
-                     getAllPotentiallyHugeUtxo, getLocalTxs, withTxpLocalData)
+                     getAllPotentiallyHugeUtxo, withTxpLocalData)
 import qualified Pos.GState as GS
 import           Pos.Infra.Reporting.Health.Types (HealthStatus (..))
+import           Pos.Util.Util (HasLens, HasLens', lensOf)
 import           Pos.Web.Mode (WebMode, WebModeContext (..))
 import           Pos.WorkMode.Class (WorkMode)
 
@@ -66,7 +64,6 @@ import           Pos.Web.Types (CConfirmedProposalState (..), TlsParams (..))
 type MyWorkMode ctx m =
     ( WorkMode ctx m
     , HasNodeContext ctx -- for ConvertHandler
-    , Default (MempoolExt m)
     )
 
 withRoute53HealthCheckApplication
@@ -216,17 +213,18 @@ tlsWithClientCheck host port TlsParams{..} = tlsSettings
 ----------------------------------------------------------------------------
 
 convertHandler
-    :: forall ext a.
-       NodeContext
+    :: forall ext a
+    . UpdateConfiguration
+    -> NodeContext
     -> DB.NodeDBs
     -> GenericTxpLocalData ext
     -> WebMode ext a
     -> Handler a
-convertHandler nc nodeDBs txpData handler =
+convertHandler uc nc nodeDBs txpData handler =
     liftIO
         (Mtl.runReaderT
              handler
-             (WebModeContext nodeDBs txpData nc)) `E.catches`
+             (WebModeContext nodeDBs txpData nc uc)) `E.catches`
     excHandlers
   where
     excHandlers = [E.Handler catchServant]
@@ -238,9 +236,10 @@ withNat
     => Proxy api -> ServerT api (WebMode ext) -> m (Server api)
 withNat apiP handlers = do
     nc <- view nodeContext
+    uc <- view (lensOf @UpdateConfiguration)
     nodeDBs <- DB.getNodeDBs
     txpLocalData <- withTxpLocalData return
-    return $ hoistServer apiP (convertHandler nc nodeDBs txpLocalData) handlers
+    return $ hoistServer apiP (convertHandler uc nc nodeDBs txpLocalData) handlers
 
 servantServer
     :: forall ctx m.
@@ -253,74 +252,23 @@ servantServer = withNat (Proxy @NodeApi) nodeServantHandlers
 ----------------------------------------------------------------------------
 
 nodeServantHandlers
-    :: (HasConfiguration, HasUpdateConfiguration, Default ext)
-    => ServerT NodeApi (WebMode ext)
+    ::
+    ( MonadReader r m, MonadUnliftIO m, MonadDBRead m
+    , HasLens UpdateConfiguration r UpdateConfiguration
+    ) => ServerT NodeApi m
 nodeServantHandlers =
-    getLeaders
-    :<|>
-    getUtxo
-    :<|>
-    getOurPublicKey
-    :<|>
-    GS.getTip
-    :<|>
-    getLocalTxsNum
+    getAllPotentiallyHugeUtxo
     :<|>
     confirmedProposals
-    :<|>
-    toggleSscParticipation
-    -- :<|> sscHasSecret
-    -- :<|> getOurSecret
-    -- :<|> getSscStage
-
-getLeaders :: HasConfiguration => Maybe EpochIndex -> WebMode ext SlotLeaders
-getLeaders maybeEpoch = do
-    -- epoch <- maybe (siEpoch <$> getCurrentSlot) pure maybeEpoch
-    epoch <- maybe (pure 0) pure maybeEpoch
-    maybe (throwM err) pure =<< LrcDB.getLeadersForEpoch epoch
-  where
-    err = err404 { errBody = encodeUtf8 ("Leaders are not know for current epoch"::Text) }
-
-getUtxo :: HasConfiguration => WebMode ext [TxOut]
-getUtxo = map toaOut . toList <$> getAllPotentiallyHugeUtxo
-
-getLocalTxsNum :: Default ext => WebMode ext Word
-getLocalTxsNum = fromIntegral . length <$> withTxpLocalData getLocalTxs
 
 -- | Get info on all confirmed proposals
 confirmedProposals
-    :: (HasUpdateConfiguration, MonadDBRead m, MonadUnliftIO m)
+    :: (MonadDBRead m, MonadUnliftIO m, MonadReader r m, HasLens' r UpdateConfiguration)
     => m [CConfirmedProposalState]
 confirmedProposals = do
-    proposals <- GS.getConfirmedProposals Nothing
+    uc <- view (lensOf @UpdateConfiguration)
+    proposals <- GS.getConfirmedProposals uc Nothing
     pure $ map (CConfirmedProposalState . show) proposals
-
-toggleSscParticipation :: Bool -> WebMode ext ()
-toggleSscParticipation enable =
-    view sscContext >>=
-    atomically . flip writeTVar enable . scParticipateSsc
-
--- sscHasSecret :: SscWebHandler Bool
--- sscHasSecret = isJust <$> getSecret
-
--- getOurSecret :: SscWebHandler SharedSeed
--- getOurSecret = maybe (throw err) (pure . convertSscSecret) =<< getSecret
---   where
---     err = err404 { errBody = "I don't have secret" }
---     doPanic = panic "our secret is malformed"
---     convertSscSecret =
---         secretToSharedSeed .
---         fromMaybe doPanic . fromBinaryM . getOpening . view _2
-
--- getSscStage :: SscWebHandler SscStage
--- getSscStage = do
---     getSscStageImpl . siSlot <$> getCurrentSlot
---   where
---     getSscStageImpl idx
---         | isCommitmentIdx idx = CommitmentStage
---         | isOpeningIdx idx = OpeningStage
---         | isSharesIdx idx = SharesStage
---         | otherwise = OrdinaryStage
 
 ----------------------------------------------------------------------------
 -- HealthCheck handlers

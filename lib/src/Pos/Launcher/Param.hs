@@ -12,7 +12,6 @@ module Pos.Launcher.Param
 import           Universum
 
 import           Control.Lens (makeLensesWith)
-import           System.Wlog (LoggerName)
 
 import           Pos.Behavior (BehaviorConfig (..))
 import           Pos.Chain.Security (SecurityParams)
@@ -22,11 +21,13 @@ import           Pos.Core (HasPrimaryKey (..))
 import           Pos.Core.NetworkAddress (NetworkAddress)
 import           Pos.Crypto (SecretKey)
 import           Pos.Infra.DHT.Real.Param (KademliaParams)
+import           Pos.Infra.InjectFail (FInjects)
 import           Pos.Infra.Network.Types (NetworkConfig)
 import           Pos.Infra.Statistics (EkgParams, StatsdParams)
 import           Pos.Util.Lens (postfixLFields)
 import           Pos.Util.UserSecret (UserSecret)
 import           Pos.Util.Util (HasLens (..))
+import           Pos.Util.Wlog (LoggerName)
 
 -- | Contains all parameters required for hierarchical logger initialization.
 data LoggingParams = LoggingParams
@@ -63,7 +64,8 @@ data NodeParams = NodeParams
     , npNetworkConfig  :: !(NetworkConfig KademliaParams)
     , npBehaviorConfig :: !BehaviorConfig       -- ^ Behavior (e.g. SSC settings)
     , npAssetLockPath  :: !(Maybe FilePath)     -- ^ Path to assetLocked source address file.
-    } -- deriving (Show)
+    , npFInjects       :: !(FInjects IO)        -- ^ Failure injection handle
+    }
 
 makeLensesWith postfixLFields ''NodeParams
 makeLensesWith postfixLFields ''BehaviorConfig

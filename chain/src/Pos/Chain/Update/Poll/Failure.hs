@@ -11,13 +11,16 @@ import           Formatting (bprint, build, int, sformat, stext, (%))
 import qualified Formatting.Buildable
 import           Serokell.Data.Memory.Units (Byte, memory)
 
+import           Pos.Chain.Block.Header (HeaderHash)
+import           Pos.Chain.Update.ApplicationName (ApplicationName)
+import           Pos.Chain.Update.BlockVersion (BlockVersion)
+import           Pos.Chain.Update.BlockVersionData (BlockVersionData)
+import           Pos.Chain.Update.BlockVersionModifier (BlockVersionModifier)
+import           Pos.Chain.Update.SoftwareVersion (NumSoftwareVersion)
+import           Pos.Chain.Update.Vote (UpAttributes, UpId)
 import           Pos.Core (Coin, EpochIndex, ScriptVersion, StakeholderId,
                      coinF)
-import           Pos.Core.Block (HeaderHash)
 import           Pos.Core.Reporting (MonadReporting, reportError)
-import           Pos.Core.Update (ApplicationName, BlockVersion,
-                     BlockVersionData, BlockVersionModifier,
-                     NumSoftwareVersion, UpAttributes, UpId)
 import           Pos.Crypto (shortHashF)
 
 -- | PollVerFailure represents all possible errors which can
@@ -124,6 +127,7 @@ data PollVerFailure
     | PollTipMismatch !HeaderHash !HeaderHash
     | PollInvalidUpdatePayload !Text
     | PollInternalError !Text
+    | PollUpdateVersionNoChange !BlockVersion !NumSoftwareVersion
 
 instance Buildable PollVerFailure where
     build (PollInconsistentBVM pibExpected pibFound pibUpId) =
@@ -216,6 +220,10 @@ instance Buildable PollVerFailure where
         bprint ("invalid update payload: "%stext) msg
     build (PollInternalError msg) =
         bprint ("internal error: "%stext) msg
+    build (PollUpdateVersionNoChange blockVer softVer) =
+        bprint ("update did not increment the block version ("%build
+               %") or the software version ("%build%").")
+               blockVer softVer
 
 -- | Report an error if it's unexpected.
 --

@@ -15,13 +15,12 @@ import           Test.QuickCheck (Arbitrary (..), Gen, listOf)
 import           Test.QuickCheck.Arbitrary.Generic (genericArbitrary,
                      genericShrink)
 
-import           Pos.Chain.Delegation (DlgPayload (..), DlgUndo (..))
+import           Pos.Chain.Delegation (DlgPayload (..), DlgUndo (..),
+                     HeavyDlgIndex (..), LightDlgIndices (..))
 import           Pos.Core (EpochIndex)
-import           Pos.Core.Delegation (HeavyDlgIndex (..))
 import           Pos.Crypto (ProtocolMagic, ProxySecretKey (..), createPsk)
 
 import           Test.Pos.Core.Arbitrary ()
-import           Test.Pos.Crypto.Dummy (dummyProtocolMagic)
 
 genDlgPayload :: ProtocolMagic -> EpochIndex -> Gen DlgPayload
 genDlgPayload pm epoch =
@@ -31,9 +30,23 @@ genDlgPayload pm epoch =
     genPSK = createPsk pm <$> arbitrary <*> arbitrary <*> pure (HeavyDlgIndex epoch)
 
 instance Arbitrary DlgPayload where
-    arbitrary = arbitrary >>= genDlgPayload dummyProtocolMagic
+    arbitrary = do
+        pm <- arbitrary
+        ei <- arbitrary
+        genDlgPayload pm ei
     shrink = genericShrink
 
 instance Arbitrary DlgUndo where
     arbitrary = genericArbitrary
+    shrink = genericShrink
+
+instance Arbitrary HeavyDlgIndex where
+    arbitrary = HeavyDlgIndex <$> arbitrary
+    shrink = genericShrink
+
+instance Arbitrary LightDlgIndices where
+    arbitrary = do
+        l <- arbitrary
+        r <- arbitrary
+        pure $ LightDlgIndices $ if r >= l then (l,r) else (r,l)
     shrink = genericShrink

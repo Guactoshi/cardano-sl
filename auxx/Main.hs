@@ -1,3 +1,5 @@
+{-# LANGUAGE RecordWildCards #-}
+
 module Main
        ( main
        ) where
@@ -9,15 +11,14 @@ import           Data.Maybe (fromMaybe)
 import           Formatting (sformat, shown, (%))
 import qualified Network.Transport.TCP as TCP (TCPAddr (..))
 import qualified System.IO.Temp as Temp
-import           System.Wlog (LoggerName, logInfo)
 
 import           Ntp.Client (NtpConfiguration)
 
+import           Pos.Chain.Genesis as Genesis (Config (..), ConfigurationError)
 import           Pos.Chain.Txp (TxpConfiguration)
+import           Pos.Chain.Update (updateConfiguration)
 import qualified Pos.Client.CLI as CLI
 import           Pos.Context (NodeContext (..))
-import           Pos.Core (ConfigurationError, epochSlots)
-import           Pos.Crypto (ProtocolMagic)
 import           Pos.DB.DB (initNodeDBs)
 import           Pos.DB.Txp (txpGlobalSettings)
 import           Pos.Infra.Diffusion.Types (Diffusion, hoistDiffusion)
@@ -25,12 +26,14 @@ import           Pos.Infra.Network.Types (NetworkConfig (..), Topology (..),
                      topologyDequeuePolicy, topologyEnqueuePolicy,
                      topologyFailurePolicy)
 import           Pos.Launcher (HasConfigurations, NodeParams (..),
-                     NodeResources (..), bracketNodeResources, loggerBracket,
-                     lpConsoleLog, runNode, runRealMode, withConfigurations)
+                     NodeResources (..), WalletConfiguration,
+                     bracketNodeResources, loggerBracket, lpConsoleLog,
+                     runNode, runRealMode, withConfigurations)
 import           Pos.Util (logException)
 import           Pos.Util.CompileInfo (HasCompileInfo, withCompileInfo)
 import           Pos.Util.Config (ConfigurationException (..))
 import           Pos.Util.UserSecret (usVss)
+import           Pos.Util.Wlog (LoggerName, logInfo)
 import           Pos.WorkMode (EmptyMempoolExt, RealMode)
 
 import           AuxxOptions (AuxxAction (..), AuxxOptions (..),
@@ -75,13 +78,13 @@ correctNodeParams AuxxOptions {..} np = do
 
 runNodeWithSinglePlugin ::
        (HasConfigurations, HasCompileInfo)
-    => ProtocolMagic
+    => Genesis.Config
     -> TxpConfiguration
     -> NodeResources EmptyMempoolExt
     -> (Diffusion AuxxMode -> AuxxMode ())
     -> Diffusion AuxxMode -> AuxxMode ()
-runNodeWithSinglePlugin pm txpConfig nr plugin =
-    runNode pm txpConfig nr [plugin]
+runNodeWithSinglePlugin genesisConfig txpConfig nr plugin =
+    runNode genesisConfig txpConfig nr [ ("runNodeWithSinglePlugin", plugin) ]
 
 action :: HasCompileInfo => AuxxOptions -> Either WithCommandAction Text -> IO ()
 action opts@AuxxOptions {..} command = do
@@ -91,21 +94,37 @@ action opts@AuxxOptions {..} command = do
             ->
                 handle @_ @ConfigurationException (\_ -> runWithoutNode pa)
               . handle @_ @ConfigurationError (\_ -> runWithoutNode pa)
-              $ withConfigurations Nothing conf (runWithConfig pa)
+              $ withConfigurations Nothing
+                                   cnaDumpGenesisDataPath
+                                   cnaDumpConfiguration
+                                   conf
+                                   (runWithConfig pa)
         Light
             -> runWithoutNode pa
-        _   -> withConfigurations Nothing conf (runWithConfig pa)
-
+        _   -> withConfigurations Nothing
+                                  cnaDumpGenesisDataPath
+                                  cnaDumpConfiguration
+                                  conf
+                                  (runWithConfig pa)
   where
     runWithoutNode :: PrintAction IO -> IO ()
     runWithoutNode printAction = printAction "Mode: light" >> rawExec Nothing Nothing Nothing opts Nothing command
 
-    runWithConfig :: HasConfigurations => PrintAction IO -> ProtocolMagic -> TxpConfiguration -> NtpConfiguration -> IO ()
-    runWithConfig printAction pm txpConfig ntpConfig = do
+    runWithConfig
+        :: HasConfigurations
+        => PrintAction IO
+        -> Genesis.Config
+        -> WalletConfiguration
+        -> TxpConfiguration
+        -> NtpConfiguration
+        -> IO ()
+    runWithConfig printAction genesisConfig _walletConfig txpConfig _ntpConfig = do
         printAction "Mode: with-config"
-        CLI.printInfoOnStart aoCommonNodeArgs ntpConfig txpConfig
-        (nodeParams, tempDbUsed) <-
-            correctNodeParams opts =<< CLI.getNodeParams loggerName cArgs nArgs
+        (nodeParams, tempDbUsed) <- (correctNodeParams opts . fst) =<< CLI.getNodeParams
+            loggerName
+            cArgs
+            nArgs
+            (configGeneratedSecrets genesisConfig)
 
         let toRealMode :: AuxxMode a -> RealMode EmptyMempoolExt a
             toRealMode auxxAction = do
@@ -119,19 +138,25 @@ action opts@AuxxOptions {..} command = do
                               (npUserSecret nodeParams ^. usVss)
             sscParams = CLI.gtSscParams cArgs vssSK (npBehaviorConfig nodeParams)
 
-        bracketNodeResources nodeParams sscParams (txpGlobalSettings pm txpConfig) (initNodeDBs pm epochSlots) $ \nr ->
+        bracketNodeResources genesisConfig
+                             nodeParams
+                             sscParams
+                             (txpGlobalSettings genesisConfig txpConfig)
+                             (initNodeDBs genesisConfig) $ \nr ->
             let NodeContext {..} = nrContext nr
                 modifier = if aoStartMode == WithNode
-                           then runNodeWithSinglePlugin pm txpConfig nr
+                           then runNodeWithSinglePlugin genesisConfig txpConfig nr
                            else identity
-                auxxModeAction = modifier (auxxPlugin pm txpConfig opts command)
-             in runRealMode pm txpConfig nr $ \diffusion ->
+                auxxModeAction = modifier (auxxPlugin genesisConfig txpConfig opts command)
+             in runRealMode updateConfiguration genesisConfig txpConfig nr $ \diffusion ->
                     toRealMode (auxxModeAction (hoistDiffusion realModeToAuxx toRealMode diffusion))
 
     cArgs@CLI.CommonNodeArgs {..} = aoCommonNodeArgs
     conf = CLI.configurationOptions (CLI.commonArgs cArgs)
     nArgs =
-        CLI.NodeArgs {behaviorConfigPath = Nothing}
+        CLI.NodeArgs
+            { behaviorConfigPath = Nothing
+            }
 
 main :: IO ()
 main = withCompileInfo $ do
@@ -147,7 +172,7 @@ main = withCompileInfo $ do
             | otherwise = identity
         loggingParams = disableConsoleLog $
             CLI.loggingParams loggerName (aoCommonNodeArgs opts)
-    loggerBracket loggingParams . logException "auxx" $ do
+    loggerBracket "auxx" loggingParams . logException "auxx" $ do
         let runAction a = action opts a
         case aoAction opts of
             Repl    -> withAuxxRepl $ \c -> runAction (Left c)

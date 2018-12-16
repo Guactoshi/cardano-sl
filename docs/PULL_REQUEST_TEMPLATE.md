@@ -20,6 +20,7 @@
 - [ ] I have read the [style guide](https://github.com/input-output-hk/cardano-sl/blob/develop/docs/style-guide.md) document, and my code follows the code style of this project.
 - [ ] If my code deals with exceptions, it follows the [guidelines](https://github.com/input-output-hk/cardano-sl/blob/develop/docs/exceptions.md).
 - [ ] I have updated any documentation accordingly, if needed. Documentation changes can be reflected in opening a PR on [cardanodocs.com](https://github.com/input-output-hk/cardanodocs.com), amending the inline [Haddock](https://www.haskell.org/haddock/) comments, any relevant README file or one of the document listed in the [docs](https://github.com/input-output-hk/cardano-sl/tree/develop/docs) directory.
+- [ ] CHANGELOG entry has been added and is linked to the correct PR on GitHub.
 
 ## Testing checklist
 <!-- If you aren't providing any tests as part of this PR, use this section to state clearly why. It needs to be a strong motivation and definitely the exception, not the rule. -->
@@ -31,3 +32,8 @@
 
 ## Screenshots (if available)
 <!--- Upload a GIF, an asciinema video or an image demoing the feature -->
+
+## How to merge
+
+Send the message `bors r+` to merge this PR. For more information, see
+[`docs/how-to/bors.md`](https://github.com/input-output-hk/cardano-sl/blob/develop/docs/how-to/bors.md).

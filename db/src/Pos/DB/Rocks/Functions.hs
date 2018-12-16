@@ -1,4 +1,5 @@
-{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE RankNTypes      #-}
+{-# LANGUAGE RecordWildCards #-}
 
 -- | Functions related to rocksdb implementation of database
 -- interface.
@@ -10,6 +11,7 @@ module Pos.DB.Rocks.Functions
        , closeRocksDB
        , openNodeDBs
        , closeNodeDBs
+       , deleteNodeDBs
        , usingReadOptions
        , usingWriteOptions
 
@@ -38,13 +40,12 @@ import           Data.Conduit (ConduitT, bracketP, yield)
 import qualified Database.RocksDB as Rocks
 import           System.Directory (createDirectoryIfMissing, doesDirectoryExist,
                      removeDirectoryRecursive)
-import           System.FilePath ((</>))
+import           System.FilePath (takeDirectory, (</>))
 
-import           Pos.Binary.Class (Bi)
-import           Pos.Core.Configuration (HasCoreConfiguration)
+import           Pos.Binary.Class (Bi, serialize')
 import           Pos.DB.BatchOp (rocksWriteBatch)
 import           Pos.DB.Class (DBIteratorClass (..), DBTag (..), IterType)
-import           Pos.DB.Functions (dbSerializeValue, processIterEntry)
+import           Pos.DB.Functions (processIterEntry)
 import           Pos.DB.Rocks.Types (DB (..), MonadRealDB, NodeDBs (..),
                      getDBByTag)
 import qualified Pos.Util.Concurrent.RWLock as RWL
@@ -77,6 +78,7 @@ openNodeDBs recreate fp = do
     let blocksDir = fp </> "blocks"
     let blocksIndexPath = blocksDir </> "index"
     let _blockDataDir = blocksDir </> "data"
+    let _epochDataDir = fp </> "epochs"
     let gStatePath = fp </> "gState"
     let lrcPath = fp </> "lrc"
     let miscPath = fp </> "misc"
@@ -84,6 +86,7 @@ openNodeDBs recreate fp = do
         [ blocksDir
         , _blockDataDir
         , blocksIndexPath
+        , _epochDataDir
         , gStatePath
         , lrcPath
         , miscPath
@@ -92,7 +95,7 @@ openNodeDBs recreate fp = do
     _gStateDB <- openRocksDB gStatePath
     _lrcDB <- openRocksDB lrcPath
     _miscDB <- openRocksDB miscPath
-    _miscLock <- RWL.new
+    _epochLock <- RWL.new
     pure NodeDBs {..}
   where
     ensureDirectoryExists :: MonadIO m => FilePath -> m ()
@@ -102,6 +105,10 @@ openNodeDBs recreate fp = do
 closeNodeDBs :: MonadIO m => NodeDBs -> m ()
 closeNodeDBs NodeDBs {..} =
     mapM_ closeRocksDB [_blockIndexDB, _gStateDB, _lrcDB, _miscDB]
+
+deleteNodeDBs :: MonadIO m => NodeDBs -> m ()
+deleteNodeDBs =
+    liftIO . removeDirectoryRecursive . takeDirectory . _epochDataDir
 
 usingReadOptions
     :: MonadRealDB ctx m
@@ -140,8 +147,8 @@ rocksDelete k DB {..} = Rocks.delete rocksDB rocksWriteOpts k
 -- garbage, should be abstracted and hidden
 
 -- | Write serializable value to RocksDb for given key.
-rocksPutBi :: (HasCoreConfiguration, Bi v, MonadIO m) => ByteString -> v -> DB -> m ()
-rocksPutBi k v = rocksPutBytes k (dbSerializeValue v)
+rocksPutBi :: (Bi v, MonadIO m) => ByteString -> v -> DB -> m ()
+rocksPutBi k v = rocksPutBytes k (serialize' v)
 
 ----------------------------------------------------------------------------
 -- Snapshot
@@ -176,7 +183,6 @@ rocksIterSource ::
        , DBIteratorClass i
        , Bi (IterKey i)
        , Bi (IterValue i)
-       , HasCoreConfiguration
        )
     => DBTag
     -> Proxy i
@@ -228,7 +234,6 @@ dbIterSourceDefault ::
        , DBIteratorClass i
        , Bi (IterKey i)
        , Bi (IterValue i)
-       , HasCoreConfiguration
        )
     => DBTag
     -> Proxy i

@@ -1,3 +1,10 @@
+{-# LANGUAGE DeriveGeneric         #-}
+{-# LANGUAGE FlexibleContexts      #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE ScopedTypeVariables   #-}
+{-# LANGUAGE TypeApplications      #-}
+{-# LANGUAGE UndecidableInstances  #-}
+
 -- | Arbitrary instances for Lrc types.
 
 module Test.Pos.Chain.Lrc.Arbitrary
@@ -14,12 +21,11 @@ import           Test.QuickCheck (Arbitrary (..), Gen, choose, vector)
 import           Test.QuickCheck.Arbitrary.Generic (genericShrink)
 
 import           Pos.Chain.Lrc (RichmenStakes)
+import           Pos.Chain.Update (BlockVersionData (bvdMpcThd))
 import           Pos.Core.Common (Coin, CoinPortion, coinPortionToDouble,
                      mkCoin, unsafeAddCoin, unsafeGetCoin, unsafeSubCoin)
-import           Pos.Core.Configuration (HasGenesisBlockVersionData,
-                     genesisBlockVersionData)
-import           Pos.Core.Update (BlockVersionData (bvdMpcThd))
 
+import           Test.Pos.Chain.Genesis.Dummy (dummyBlockVersionData)
 import           Test.Pos.Core.Arbitrary ()
 
 -- | Wrapper over 'RichmenStakes'. Its 'Arbitrary' instance enforces that the
@@ -76,5 +82,5 @@ genRichmenStakes thd = do
 
 data GenesisMpcThd
 
-instance HasGenesisBlockVersionData => Reifies GenesisMpcThd CoinPortion where
-    reflect _ = bvdMpcThd genesisBlockVersionData
+instance Reifies GenesisMpcThd CoinPortion where
+    reflect _ = bvdMpcThd dummyBlockVersionData

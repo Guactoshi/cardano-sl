@@ -1,4 +1,5 @@
-{-# LANGUAGE Rank2Types #-}
+{-# LANGUAGE Rank2Types      #-}
+{-# LANGUAGE RecordWildCards #-}
 
 -- | Propagation of runtime configuration.
 
@@ -25,8 +26,10 @@ import           Data.Maybe (fromMaybe)
 import           Data.Reflection (Given (..), give)
 import           Distribution.System (buildArch, buildOS)
 
-import           Pos.Core.Update (ApplicationName, BlockVersion (..),
-                     SoftwareVersion (..), SystemTag (..), archHelper,
+import           Pos.Chain.Update.ApplicationName (ApplicationName)
+import           Pos.Chain.Update.BlockVersion (BlockVersion (..))
+import           Pos.Chain.Update.SoftwareVersion (SoftwareVersion (..))
+import           Pos.Chain.Update.SystemTag (SystemTag (..), archHelper,
                      osHelper)
 
 ----------------------------------------------------------------------------
@@ -52,7 +55,7 @@ data UpdateConfiguration = UpdateConfiguration
       -- | System tag.
     , ccSystemTag             :: !SystemTag
     }
-    deriving (Show, Generic)
+    deriving (Eq, Generic, Show)
 
 instance ToJSON UpdateConfiguration where
     toJSON = genericToJSON defaultOptions
@@ -70,16 +73,16 @@ instance FromJSON UpdateConfiguration where
 ----------------------------------------------------------------------------
 
 -- | Name of our application.
-ourAppName :: HasUpdateConfiguration => ApplicationName
-ourAppName = ccApplicationName updateConfiguration
+ourAppName :: UpdateConfiguration -> ApplicationName
+ourAppName = ccApplicationName
 
 -- | Last block version application is aware of.
-lastKnownBlockVersion :: HasUpdateConfiguration => BlockVersion
-lastKnownBlockVersion = ccLastKnownBlockVersion updateConfiguration
+lastKnownBlockVersion :: UpdateConfiguration -> BlockVersion
+lastKnownBlockVersion = ccLastKnownBlockVersion
 
 -- | Version of application (code running)
-curSoftwareVersion :: HasUpdateConfiguration => SoftwareVersion
-curSoftwareVersion = SoftwareVersion ourAppName (ccApplicationVersion updateConfiguration)
+curSoftwareVersion :: UpdateConfiguration -> SoftwareVersion
+curSoftwareVersion uc = SoftwareVersion (ourAppName uc) (ccApplicationVersion uc)
 
 -- | @SystemTag@ corresponding to the operating system/architecture pair the program was
 -- compiled in.
@@ -90,5 +93,5 @@ curSoftwareVersion = SoftwareVersion ourAppName (ccApplicationVersion updateConf
 currentSystemTag :: SystemTag
 currentSystemTag = SystemTag (toText (osHelper buildOS ++ archHelper buildArch))
 
-ourSystemTag :: HasUpdateConfiguration => SystemTag
-ourSystemTag = ccSystemTag updateConfiguration
+ourSystemTag :: UpdateConfiguration -> SystemTag
+ourSystemTag = ccSystemTag

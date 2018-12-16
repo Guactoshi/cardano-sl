@@ -60,18 +60,18 @@ import           Serokell.Data.Memory.Units (Byte)
 import           Pos.Binary.Class (AsBinary (..))
 import           Pos.Binary.Limit (Limit (..), mlBool, mlEither, mlMaybe,
                      mlTriple, mlTuple, vectorOf, vectorOfNE, (<+>))
-import           Pos.Chain.Ssc (MCCommitment (..), MCOpening (..),
-                     MCShares (..), MCVssCertificate (..))
+import           Pos.Chain.Block (Block, BlockHeader (..), GenesisBlock,
+                     GenesisBlockHeader, MainBlock, MainBlockHeader)
+import           Pos.Chain.Delegation (HeavyDlgIndex (..), LightDlgIndices (..))
+import           Pos.Chain.Ssc (Commitment (..), InnerSharesMap,
+                     MCCommitment (..), MCOpening (..), MCShares (..),
+                     MCVssCertificate (..), Opening (..), SignedCommitment,
+                     VssCertificate)
+import           Pos.Chain.Txp (TxAux, TxMsgContents (..))
+import           Pos.Chain.Update (BlockVersionData (..), UpId,
+                     UpdateProposal (..), UpdateVote (..))
 import           Pos.Core (BlockCount, EpochIndex, StakeholderId,
                      coinPortionToDouble)
-import           Pos.Core.Block (Block, BlockHeader (..), GenesisBlock,
-                     GenesisBlockHeader, MainBlock, MainBlockHeader)
-import           Pos.Core.Delegation (HeavyDlgIndex (..), LightDlgIndices (..))
-import           Pos.Core.Ssc (Commitment (..), InnerSharesMap, Opening (..),
-                     SignedCommitment, VssCertificate)
-import           Pos.Core.Txp (TxAux, TxMsgContents (..))
-import           Pos.Core.Update (BlockVersionData (..), UpId,
-                     UpdateProposal (..), UpdateVote (..))
 import           Pos.Crypto (ProxyCert (..), ProxySecretKey (..),
                      SecretProof (..))
 import           Pos.Network.Block.Types (MsgBlock (..), MsgGetBlocks (..),
@@ -279,7 +279,7 @@ mlBlockHeader bvd = 1 + max (BlockHeaderGenesis <$> mlGenesisBlockHeader bvd)
                             (BlockHeaderMain    <$> mlMainBlockHeader bvd)
 
 mlGenesisBlock :: BlockVersionData -> Limit GenesisBlock
-mlGenesisBlock = Limit . fromIntegral . bvdMaxBlockSize
+mlGenesisBlock _ = Limit 2000000
 
 mlMainBlock :: BlockVersionData -> Limit MainBlock
 mlMainBlock = Limit . fromIntegral . bvdMaxBlockSize

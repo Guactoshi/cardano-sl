@@ -1,3 +1,5 @@
+{-# LANGUAGE RecordWildCards #-}
+
 -- | Logic of application and verification of data in Poll.
 
 module Pos.DB.Update.Poll.Logic.Apply
@@ -13,35 +15,35 @@ import qualified Data.HashSet as HS
 import           Data.List (partition)
 import qualified Data.List.NonEmpty as NE
 import           Formatting (build, builder, int, sformat, (%))
-import           System.Wlog (logDebug, logInfo, logNotice)
 
 import           Pos.Binary.Class (biSize)
-import           Pos.Chain.Update (ConfirmedProposalState (..),
-                     DecidedProposalState (..), DpsExtra (..), MonadPoll (..),
-                     MonadPollRead (..), PollVerFailure (..),
-                     ProposalState (..), UndecidedProposalState (..),
-                     UpsExtra (..), psProposal)
-import           Pos.Core (ChainDifficulty (..), Coin, EpochIndex,
-                     HasProtocolConstants, ProtocolMagic, SlotId (..),
-                     addressHash, applyCoinPortionUp, coinToInteger,
-                     difficultyL, epochIndexL, flattenSlotId, sumCoins,
-                     unflattenSlotId, unsafeIntegerToCoin)
-import           Pos.Core.Attributes (areAttributesKnown)
-import           Pos.Core.Block (HeaderHash, IsMainHeader (..), headerHashG,
+import           Pos.Chain.Block (HeaderHash, IsMainHeader (..), headerHashG,
                      headerSlotL)
-import           Pos.Core.Configuration (blkSecurityParam)
-import           Pos.Core.Update (BlockVersion, BlockVersionData (..),
-                     SoftwareVersion (..), UpId, UpdatePayload (..),
-                     UpdateProposal (..), UpdateVote (..), blockVersionL,
-                     bvdUpdateProposalThd, checkUpdatePayload)
+import           Pos.Chain.Genesis as Genesis (Config (..),
+                     configBlkSecurityParam, configBlockVersionData,
+                     configEpochSlots)
+import           Pos.Chain.Update (BlockVersion, BlockVersionData (..),
+                     ConfirmedProposalState (..), DecidedProposalState (..),
+                     DpsExtra (..), MonadPoll (..), MonadPollRead (..),
+                     PollVerFailure (..), ProposalState (..),
+                     SoftwareVersion (..), UndecidedProposalState (..), UpId,
+                     UpdatePayload (..), UpdateProposal (..), UpdateVote (..),
+                     UpsExtra (..), blockVersionL, bvdUpdateProposalThd,
+                     checkUpdatePayload, psProposal)
+import           Pos.Core (BlockCount, ChainDifficulty (..), Coin, EpochIndex,
+                     SlotCount, SlotId (..), addressHash, applyCoinPortionUp,
+                     coinToInteger, difficultyL, epochIndexL, flattenSlotId,
+                     sumCoins, unflattenSlotId, unsafeIntegerToCoin)
+import           Pos.Core.Attributes (areAttributesKnown)
 import           Pos.Crypto (hash, shortHashF)
 import           Pos.DB.Update.Poll.Logic.Base (canBeAdoptedBV,
                      canCreateBlockBV, confirmBlockVersion, isDecided,
                      mkTotNegative, mkTotPositive, mkTotSum, putNewProposal,
                      voteToUProposalState)
 import           Pos.DB.Update.Poll.Logic.Version (verifyAndApplyProposalBVS,
-                     verifyBlockVersion, verifySoftwareVersion)
+                     verifyBlockAndSoftwareVersions)
 import           Pos.Util.Some (Some (..))
+import           Pos.Util.Wlog (logDebug, logInfo, logNotice)
 
 type ApplyMode m =
     ( MonadError PollVerFailure m
@@ -62,17 +64,18 @@ type ApplyMode m =
 -- When it is 'Right header', it means that payload from block with
 -- given header is applied and in this case threshold for update proposal is
 -- checked.
-verifyAndApplyUSPayload ::
-       (ApplyMode m, HasProtocolConstants)
-    => ProtocolMagic
+verifyAndApplyUSPayload
+    :: ApplyMode m
+    => Genesis.Config
     -> BlockVersion
     -> Bool
     -> Either SlotId (Some IsMainHeader)
     -> UpdatePayload
     -> m ()
-verifyAndApplyUSPayload pm lastAdopted verifyAllIsKnown slotOrHeader upp@UpdatePayload {..} = do
+verifyAndApplyUSPayload genesisConfig lastAdopted verifyAllIsKnown slotOrHeader upp@UpdatePayload {..} = do
     -- First of all, we verify data.
-    either (throwError . PollInvalidUpdatePayload) pure =<< runExceptT (checkUpdatePayload pm upp)
+    either (throwError . PollInvalidUpdatePayload) pure
+        =<< runExceptT (checkUpdatePayload (configProtocolMagic genesisConfig) upp)
     whenRight slotOrHeader $ verifyHeader lastAdopted
 
     unless isEmptyPayload $ do
@@ -84,15 +87,18 @@ verifyAndApplyUSPayload pm lastAdopted verifyAllIsKnown slotOrHeader upp@UpdateP
         let (curPropVotes, otherVotes) = partition votePredicate upVotes
         let otherGroups = NE.groupWith uvProposalId otherVotes
         -- When there is proposal in payload, it's verified and applied.
-        whenJust upProposal $
-            verifyAndApplyProposal verifyAllIsKnown slotOrHeader curPropVotes
+        whenJust upProposal $ verifyAndApplyProposal
+            genesisBvd
+            verifyAllIsKnown
+            slotOrHeader
+            curPropVotes
         -- Then we also apply votes from other groups.
         -- ChainDifficulty is needed, because proposal may become approved
         -- and then we'll need to track whether it becomes confirmed.
         let cd = case slotOrHeader of
                 Left  _ -> Nothing
                 Right h -> Just (h ^. difficultyL, h ^. headerHashG)
-        mapM_ (verifyAndApplyVotesGroup cd) otherGroups
+        mapM_ (verifyAndApplyVotesGroup genesisBvd cd) otherGroups
     -- If we are applying payload from block, we also check implicit
     -- agreement rule and depth of decided proposals (they can become
     -- confirmed/discarded).
@@ -100,19 +106,22 @@ verifyAndApplyUSPayload pm lastAdopted verifyAllIsKnown slotOrHeader upp@UpdateP
         Left _           -> pass
         Right mainHeader -> do
             applyImplicitAgreement
+                (configEpochSlots genesisConfig)
                 (mainHeader ^. headerSlotL)
                 (mainHeader ^. difficultyL)
                 (mainHeader ^. headerHashG)
             applyDepthCheck
+                (configBlkSecurityParam genesisConfig)
                 (mainHeader ^. epochIndexL)
                 (mainHeader ^. headerHashG)
                 (mainHeader ^. difficultyL)
   where
+    genesisBvd = configBlockVersionData genesisConfig
     isEmptyPayload = isNothing upProposal && null upVotes
 
 -- Here we verify all US-related data from header.
 verifyHeader
-    :: (MonadError PollVerFailure m, MonadPollRead m, IsMainHeader mainHeader)
+    :: (MonadError PollVerFailure m, MonadPoll m, IsMainHeader mainHeader)
     => BlockVersion -> mainHeader -> m ()
 verifyHeader lastAdopted header = do
     let versionInHeader = header ^. blockVersionL
@@ -124,13 +133,13 @@ verifyHeader lastAdopted header = do
 -- If stakeholder wasn't richman at that point, PollNotRichman is thrown.
 resolveVoteStake
     :: (MonadError PollVerFailure m, MonadPollRead m)
-    => EpochIndex -> Coin -> UpdateVote -> m Coin
-resolveVoteStake epoch totalStake vote = do
+    => BlockVersionData -> EpochIndex -> Coin -> UpdateVote -> m Coin
+resolveVoteStake genesisBvd epoch totalStake vote = do
     let !id = addressHash (uvKey vote)
     thresholdPortion <- bvdUpdateProposalThd <$> getAdoptedBVData
     let threshold = applyCoinPortionUp thresholdPortion totalStake
     let errNotRichman mbStake = PollNotRichman id threshold mbStake
-    stake <- note (errNotRichman Nothing) =<< getRichmanStake epoch id
+    stake <- note (errNotRichman Nothing) =<< getRichmanStake genesisBvd epoch id
     when (stake < threshold) $
         throwError $ errNotRichman (Just stake)
     return stake
@@ -154,12 +163,13 @@ resolveVoteStake epoch totalStake vote = do
 -- state (if it has enough voted stake at once).
 verifyAndApplyProposal
     :: (MonadError PollVerFailure m, MonadPoll m)
-    => Bool
+    => BlockVersionData
+    -> Bool
     -> Either SlotId (Some IsMainHeader)
     -> [UpdateVote]
     -> UpdateProposal
     -> m ()
-verifyAndApplyProposal verifyAllIsKnown slotOrHeader votes
+verifyAndApplyProposal genesisBvd verifyAllIsKnown slotOrHeader votes
                            up@UnsafeUpdateProposal {..} = do
     let !upId = hash up
     let !upFromId = addressHash upFrom
@@ -179,15 +189,14 @@ verifyAndApplyProposal verifyAllIsKnown slotOrHeader votes
     -- Here we verify consistency with regards to data from 'BlockVersionState'
     -- and update relevant state if necessary.
     verifyAndApplyProposalBVS upId epoch up
-    -- Then we verify that protocol version from proposal can follow last
-    -- adopted protocol version.
-    verifyBlockVersion upId up
-    -- We also verify that software version is expected one.
-    verifySoftwareVersion upId up
+    -- Then we verify the block and software versions from proposal are valid
+    verifyBlockAndSoftwareVersions upId up
     -- After that we resolve stakes of all votes.
-    totalStake <- note (PollUnknownStakes epoch) =<< getEpochTotalStake epoch
-    votesAndStakes <-
-        mapM (\v -> (v, ) <$> resolveVoteStake epoch totalStake v) votes
+    totalStake <- note (PollUnknownStakes epoch)
+        =<< getEpochTotalStake genesisBvd epoch
+    votesAndStakes <- mapM
+        (\v -> (v, ) <$> resolveVoteStake genesisBvd epoch totalStake v)
+        votes
     -- When necessary, we also check that proposal itself has enough
     -- positive votes to be included into block.
     when (isRight slotOrHeader) $
@@ -226,8 +235,11 @@ verifyProposalStake totalStake votesAndStakes upId = do
 -- Votes are assumed to be for the same proposal.
 verifyAndApplyVotesGroup
     :: ApplyMode m
-    => Maybe (ChainDifficulty, HeaderHash) -> NonEmpty UpdateVote -> m ()
-verifyAndApplyVotesGroup cd votes = mapM_ verifyAndApplyVote votes
+    => BlockVersionData
+    -> Maybe (ChainDifficulty, HeaderHash)
+    -> NonEmpty UpdateVote
+    -> m ()
+verifyAndApplyVotesGroup genesisBvd cd votes = mapM_ verifyAndApplyVote votes
   where
     upId = uvProposalId $ NE.head votes
     verifyAndApplyVote vote = do
@@ -237,19 +249,20 @@ verifyAndApplyVotesGroup cd votes = mapM_ verifyAndApplyVote votes
         case ps of
             PSDecided _     -> throwError
                                    $ PollProposalIsDecided upId stakeholderId
-            PSUndecided ups -> verifyAndApplyVoteDo cd ups vote
+            PSUndecided ups -> verifyAndApplyVoteDo genesisBvd cd ups vote
 
 -- Here we actually apply vote to stored undecided proposal.
 verifyAndApplyVoteDo
     :: ApplyMode m
-    => Maybe (ChainDifficulty, HeaderHash)
+    => BlockVersionData
+    -> Maybe (ChainDifficulty, HeaderHash)
     -> UndecidedProposalState
     -> UpdateVote
     -> m ()
-verifyAndApplyVoteDo cd ups vote = do
+verifyAndApplyVoteDo genesisBvd cd ups vote = do
     let e = siEpoch $ upsSlot ups
-    totalStake <- note (PollUnknownStakes e) =<< getEpochTotalStake e
-    voteStake <- resolveVoteStake e totalStake vote
+    totalStake <- note (PollUnknownStakes e) =<< getEpochTotalStake genesisBvd e
+    voteStake <- resolveVoteStake genesisBvd e totalStake vote
     newUPS@UndecidedProposalState {..} <-
         voteToUProposalState (uvKey vote) voteStake (uvDecision vote) ups
     let newPS
@@ -274,11 +287,11 @@ verifyAndApplyVoteDo cd ups vote = do
 -- If proposal's total positive stake is bigger than negative, it's
 -- approved. Otherwise it's rejected.
 applyImplicitAgreement
-    :: (MonadPoll m, HasProtocolConstants)
-    => SlotId -> ChainDifficulty -> HeaderHash -> m ()
-applyImplicitAgreement (flattenSlotId -> slotId) cd hh = do
+    :: MonadPoll m
+    => SlotCount-> SlotId -> ChainDifficulty -> HeaderHash-> m ()
+applyImplicitAgreement epochSlots (flattenSlotId epochSlots -> slotId) cd hh = do
     BlockVersionData {..} <- getAdoptedBVData
-    let oldSlot = unflattenSlotId $ slotId - bvdUpdateImplicit
+    let oldSlot = unflattenSlotId epochSlots $ slotId - bvdUpdateImplicit
     -- There is no one implicit agreed proposal
     -- when slot of block is less than @bvdUpdateImplicit@
     unless (slotId < bvdUpdateImplicit) $
@@ -305,12 +318,12 @@ applyImplicitAgreement (flattenSlotId -> slotId) cd hh = do
 -- confirmed or discarded (approved become confirmed, rejected become
 -- discarded).
 applyDepthCheck
-    :: forall m . (ApplyMode m, HasProtocolConstants)
-    => EpochIndex -> HeaderHash -> ChainDifficulty -> m ()
-applyDepthCheck epoch hh (ChainDifficulty cd)
-    | cd <= blkSecurityParam = pass
+    :: forall m . ApplyMode m
+    => BlockCount -> EpochIndex -> HeaderHash -> ChainDifficulty -> m ()
+applyDepthCheck k epoch hh (ChainDifficulty cd)
+    | cd <= k = pass
     | otherwise = do
-        deepProposals <- getDeepProposals (ChainDifficulty (cd - blkSecurityParam))
+        deepProposals <- getDeepProposals (ChainDifficulty (cd - k))
         -- 1. Group proposals by application name
         -- 2. Sort proposals in each group by tuple
         --     (decision, whether decision is implicit, positive stake, slot when it has been proposed)

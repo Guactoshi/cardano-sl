@@ -19,21 +19,19 @@ import           Data.Tagged (Tagged)
 import           System.FileLock (FileLock)
 import           Test.Hspec (Spec, describe)
 import           Test.Hspec.QuickCheck (modifyMaxSuccess, prop)
-import           Test.QuickCheck (Arbitrary (..))
+import           Test.QuickCheck (Arbitrary (..), arbitrary)
 
 import           Pos.Binary.Communication ()
-import           Pos.Chain.Delegation (DlgPayload, DlgUndo)
+import           Pos.Chain.Delegation (DlgPayload, DlgUndo, ProxySKHeavy)
+import           Pos.Chain.Ssc (VssCertificate)
 import qualified Pos.Chain.Ssc as Ssc
+import           Pos.Chain.Txp (TxMsgContents (..))
 import qualified Pos.Chain.Txp as T
 import qualified Pos.Chain.Update as U
 import qualified Pos.Communication as C
 import           Pos.Communication.Limits (mlOpening, mlUpdateVote,
                      mlVssCertificate)
 import           Pos.Core (StakeholderId)
-import           Pos.Core.Delegation (ProxySKHeavy)
-import           Pos.Core.Ssc (VssCertificate)
-import qualified Pos.Core.Ssc as Ssc
-import           Pos.Core.Txp (TxMsgContents (..))
 import           Pos.Crypto.Signing (EncryptedSecretKey)
 import           Pos.Infra.Communication.Limits.Instances (mlDataMsg, mlInvMsg,
                      mlMempoolMsg, mlReqMsg)
@@ -45,10 +43,10 @@ import           Pos.Util.UserSecret (UserSecret, WalletUserSecret)
 
 import           Test.Pos.Binary.Helpers (U, binaryTest, extensionProperty,
                      msgLenLimitedTest)
+import           Test.Pos.Cbor.Arbitrary.UserSecret ()
 import           Test.Pos.Chain.Delegation.Arbitrary ()
 import           Test.Pos.Chain.Ssc.Arbitrary ()
 import           Test.Pos.Chain.Update.Arbitrary ()
-import           Test.Pos.Configuration (withDefConfiguration)
 import           Test.Pos.Core.Arbitrary ()
 import           Test.Pos.Crypto.Arbitrary ()
 import           Test.Pos.DB.Update.Arbitrary ()
@@ -65,7 +63,7 @@ type UpId' = Tagged (U.UpdateProposal, [U.UpdateVote])U.UpId
 ----------------------------------------
 
 spec :: Spec
-spec = withDefConfiguration $ \_ -> do
+spec =
     describe "Cbor.Bi instances" $ do
         modifyMaxSuccess (const 1000) $ do
             describe "Lib/core instances" $ do

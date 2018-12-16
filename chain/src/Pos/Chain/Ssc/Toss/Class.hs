@@ -12,14 +12,19 @@ import           Universum hiding (id)
 
 import           Control.Monad.Except (ExceptT)
 import           Control.Monad.Trans (MonadTrans)
-import           System.Wlog (WithLogger)
 
-import           Pos.Chain.Lrc (RichmenStakes)
+import           Pos.Chain.Genesis as Genesis (Config)
+import           Pos.Chain.Lrc.Types (RichmenStakes)
+import           Pos.Chain.Ssc.Commitment (SignedCommitment)
+import           Pos.Chain.Ssc.CommitmentsMap (CommitmentsMap)
+import           Pos.Chain.Ssc.Opening (Opening)
+import           Pos.Chain.Ssc.OpeningsMap (OpeningsMap)
+import           Pos.Chain.Ssc.SharesMap (InnerSharesMap, SharesMap)
+import           Pos.Chain.Ssc.VssCertificate (VssCertificate)
+import           Pos.Chain.Ssc.VssCertificatesMap (VssCertificatesMap)
+import           Pos.Chain.Update.BlockVersionData (BlockVersionData)
 import           Pos.Core (EpochIndex, EpochOrSlot, StakeholderId)
-import           Pos.Core.Ssc (CommitmentsMap, InnerSharesMap, Opening,
-                     OpeningsMap, SharesMap, SignedCommitment, VssCertificate,
-                     VssCertificatesMap)
-import           Pos.Core.Update (BlockVersionData)
+import           Pos.Util.Wlog (WithLogger)
 
 ----------------------------------------------------------------------------
 -- Read-only
@@ -42,7 +47,7 @@ class (Monad m, WithLogger m) =>
     getVssCertificates :: m VssCertificatesMap
 
     -- | Retrieve all stable 'VssCertificate's for given epoch.
-    getStableCertificates :: EpochIndex -> m VssCertificatesMap
+    getStableCertificates :: Genesis.Config -> EpochIndex -> m VssCertificatesMap
 
     -- | Default implementations for 'MonadTrans'.
     default getCommitments :: (MonadTrans t, MonadTossRead m', t m' ~ m) =>
@@ -62,8 +67,8 @@ class (Monad m, WithLogger m) =>
     getVssCertificates = lift getVssCertificates
 
     default getStableCertificates :: (MonadTrans t, MonadTossRead m', t m' ~ m) =>
-        EpochIndex -> m VssCertificatesMap
-    getStableCertificates = lift . getStableCertificates
+        Genesis.Config -> EpochIndex -> m VssCertificatesMap
+    getStableCertificates genesisConfig = lift . getStableCertificates genesisConfig
 
 instance MonadTossRead m => MonadTossRead (ReaderT s m)
 instance MonadTossRead m => MonadTossRead (StateT s m)

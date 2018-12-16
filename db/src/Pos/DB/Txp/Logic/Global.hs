@@ -1,4 +1,5 @@
-{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE TypeOperators   #-}
 
 -- | Logic for global processing of transactions.  Global transaction
 -- is a transaction which has already been added to the blockchain.
@@ -22,18 +23,21 @@ import qualified Data.HashMap.Strict as HM
 import qualified Data.List.NonEmpty as NE
 import           Formatting (build, sformat, (%))
 
+import           Pos.Chain.Block (ComponentBlock (..))
+import           Pos.Chain.Genesis as Genesis (Config (..),
+                     configBootStakeholders)
+import           Pos.Chain.Genesis (GenesisWStakeholders)
 import           Pos.Chain.Txp (ExtendedGlobalToilM, GlobalToilEnv (..),
                      GlobalToilM, GlobalToilState (..), StakesView (..),
-                     ToilVerFailure, TxpConfiguration (..), Utxo, UtxoM,
-                     UtxoModifier, applyToil, defGlobalToilState,
-                     flattenTxPayload, gtsUtxoModifier, rollbackToil,
-                     runGlobalToilMBase, runUtxoM, utxoToLookup, verifyToil)
-import           Pos.Core (HasCoreConfiguration, HasGenesisData, ProtocolMagic,
-                     epochIndexL)
-import           Pos.Core.Block.Union (ComponentBlock (..))
+                     ToilVerFailure, TxAux, TxUndo, TxpConfiguration (..),
+                     TxpUndo, Utxo, UtxoM, UtxoModifier, applyToil,
+                     defGlobalToilState, flattenTxPayload, gtsUtxoModifier,
+                     rollbackToil, runGlobalToilMBase, runUtxoM, utxoToLookup,
+                     verifyToil)
+import           Pos.Core (epochIndexL)
 import           Pos.Core.Chrono (NE, NewestFirst (..), OldestFirst (..))
 import           Pos.Core.Exception (assertionFailed)
-import           Pos.Core.Txp (TxAux, TxUndo, TxpUndo)
+import           Pos.Crypto (ProtocolMagic)
 import           Pos.DB (SomeBatchOp (..))
 import           Pos.DB.Class (gsAdoptedBVData)
 import           Pos.DB.GState.Stakes (getRealStake, getRealTotalStake)
@@ -52,13 +56,18 @@ import qualified Pos.Util.Modifier as MM
 
 -- | Settings used for global transactions data processing used by a
 -- simple full node.
-txpGlobalSettings :: HasGenesisData => ProtocolMagic -> TxpConfiguration -> TxpGlobalSettings
-txpGlobalSettings pm txpConfig =
-    TxpGlobalSettings
-    { tgsVerifyBlocks = verifyBlocks pm txpConfig
-    , tgsApplyBlocks = applyBlocksWith pm txpConfig (processBlundsSettings False applyToil)
-    , tgsRollbackBlocks = rollbackBlocks
+txpGlobalSettings :: Genesis.Config -> TxpConfiguration -> TxpGlobalSettings
+txpGlobalSettings genesisConfig txpConfig = TxpGlobalSettings
+    { tgsVerifyBlocks   = verifyBlocks pm txpConfig
+    , tgsApplyBlocks    = applyBlocksWith
+        pm
+        txpConfig
+        (processBlundsSettings False $ applyToil bootStakeholders)
+    , tgsRollbackBlocks = rollbackBlocks bootStakeholders
     }
+  where
+    pm               = configProtocolMagic genesisConfig
+    bootStakeholders = configBootStakeholders genesisConfig
 
 ----------------------------------------------------------------------------
 -- Verify
@@ -197,17 +206,19 @@ processBlundsSettings isRollback pureAction =
 
 rollbackBlocks ::
        forall m. (TxpGlobalRollbackMode m)
-    => NewestFirst NE TxpBlund
+    => GenesisWStakeholders
+    -> NewestFirst NE TxpBlund
     -> m SomeBatchOp
-rollbackBlocks (NewestFirst blunds) =
-    processBlunds (processBlundsSettings True rollbackToil) blunds
+rollbackBlocks bootStakeholders (NewestFirst blunds) = processBlunds
+    (processBlundsSettings True (rollbackToil bootStakeholders))
+    blunds
 
 ----------------------------------------------------------------------------
 -- Helpers
 ----------------------------------------------------------------------------
 
 -- | Convert 'GlobalToilState' to batch of database operations.
-globalToilStateToBatch :: HasCoreConfiguration => GlobalToilState -> SomeBatchOp
+globalToilStateToBatch :: GlobalToilState -> SomeBatchOp
 globalToilStateToBatch GlobalToilState {..} =
     SomeBatchOp [SomeBatchOp utxoOps, SomeBatchOp stakesOps]
   where

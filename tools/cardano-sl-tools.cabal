@@ -1,5 +1,5 @@
 name:                cardano-sl-tools
-version:             1.3.0
+version:             2.0.0
 synopsis:            Cardano SL - Tools
 description:         Cardano SL - Tools
 license:             MIT
@@ -23,77 +23,6 @@ Flag for-installer
   description: Build a reduced set of components (only what is needed for the
                installer)
 
-Flag postmortem
-  default:     False
-  manual:      True
-  description: Build the post-mortem analysis tool (ignored if for-installer is
-               true)
-
-executable dbgen
-  hs-source-dirs:      src/dbgen
-  main-is:             Main.hs
-  if !flag(for-installer)
-   build-depends:      base >= 4.7 && < 5
-                     , acid-state-exts
-                     , cardano-sl
-                     , cardano-sl-client
-                     , cardano-sl-core
-                     , cardano-sl-core-test
-                     , cardano-sl-db
-                     , cardano-sl-infra
-                     , cardano-sl-networking
-                     , cardano-sl-tools
-                     , cardano-sl-chain
-                     , cardano-sl-util
-                     , cardano-sl-wallet
-                     , containers
-                     , data-default
-                     , log-warper
-                     , network-transport-tcp >= 0.6
-                     , optparse-generic
-                     , stm
-                     , text
-                     , time
-                     , time-units
-                     , universum >= 0.1.11
-                     , unordered-containers
-  default-language:    Haskell2010
-  ghc-options:         -threaded -rtsopts
-                       -Wall
-                       -O2
-
-  -- linker speed up for linux
-  if os(linux)
-    ghc-options:       -optl-fuse-ld=gold
-    ld-options:        -fuse-ld=gold
-
-  default-extensions:   DeriveDataTypeable
-                        DeriveGeneric
-                        GeneralizedNewtypeDeriving
-                        StandaloneDeriving
-                        FlexibleContexts
-                        FlexibleInstances
-                        MultiParamTypeClasses
-                        FunctionalDependencies
-                        DefaultSignatures
-                        NoImplicitPrelude
-                        OverloadedStrings
-                        RecordWildCards
-                        TypeApplications
-                        TupleSections
-                        ViewPatterns
-                        LambdaCase
-                        MultiWayIf
-                        ConstraintKinds
-                        UndecidableInstances
-                        BangPatterns
-                        ScopedTypeVariables
-
-  build-tools: cpphs >= 1.19
-  ghc-options: -pgmP cpphs -optP --cpp
-
-  if flag(for-installer)
-    buildable: False
 
 executable cardano-genupdate
   hs-source-dirs:      src/genupdate
@@ -127,7 +56,6 @@ executable cardano-genupdate
                        NoImplicitPrelude
                        BangPatterns
                        ApplicativeDo
-                       RecordWildCards
                        ScopedTypeVariables
                        MonadFailDesugaring
 
@@ -142,14 +70,15 @@ executable cardano-keygen
                      , bytestring >= 0.10
                      , canonical-json
                      , cardano-sl
+                     , cardano-sl-chain
                      , cardano-sl-core
                      , cardano-sl-crypto
+                     , cardano-sl-util
                      , directory
                      , filepath
                      , formatting
                      , Glob
                      , lens
-                     , log-warper
                      , optparse-applicative >= 0.12
                      , serokell-util >= 0.1
                      , text
@@ -175,7 +104,6 @@ executable cardano-keygen
                         DefaultSignatures
                         NoImplicitPrelude
                         OverloadedStrings
-                        RecordWildCards
                         TypeApplications
                         TupleSections
                         ViewPatterns
@@ -206,6 +134,7 @@ executable cardano-launcher
                      , cardano-sl
                      , cardano-sl-chain
                      , cardano-sl-core
+                     , cardano-sl-crypto
                      , cardano-sl-db
                      , cardano-sl-infra
                      , cardano-sl-tools
@@ -215,12 +144,10 @@ executable cardano-launcher
                      , formatting
                      , lens
                      , lifted-async
-                     , log-warper
                      , neat-interpolation
                      , optparse-applicative
                      , process
                      , safe-exceptions
-                     , serokell-util
                      , silently
                      , text
                      , time-units
@@ -240,7 +167,6 @@ executable cardano-launcher
     ld-options:        -fuse-ld=gold
 
   default-extensions:  OverloadedStrings
-                       RecordWildCards
                        TupleSections
                        TypeApplications
                        BangPatterns
@@ -284,7 +210,6 @@ executable cardano-addr-convert
                         DefaultSignatures
                         NoImplicitPrelude
                         OverloadedStrings
-                        RecordWildCards
                         TypeApplications
                         TupleSections
                         ViewPatterns
@@ -321,7 +246,6 @@ executable cardano-cli-docs
 
   default-extensions:   NoImplicitPrelude
                         BangPatterns
-                        RecordWildCards
                         OverloadedStrings
                         ApplicativeDo
                         ScopedTypeVariables
@@ -332,92 +256,6 @@ executable cardano-cli-docs
 
   if flag(for-installer)
     buildable: False
-
-executable cardano-post-mortem
-  hs-source-dirs:      src/post-mortem
-  main-is:             Main.hs
-  other-modules:       JSONLog
-                     , Options
-                     , Statistics
-                     , Statistics.Block
-                     , Statistics.Chart
-                     , Statistics.CSV
-                     , Statistics.Focus
-                     , Statistics.Graph
-                     , Statistics.MemPool
-                     , Statistics.Report
-                     , Statistics.Throughput
-                     , Statistics.Tx
-                     , Types
-                     , Util.Aeson
-                     , Util.Pipes
-                     , Util.Safe
-  if flag(postmortem) && !flag(for-installer)
-    buildable: True
-    build-depends:       Chart
-                       , Chart-diagrams
-                       , MonadRandom
-                       , aeson
-                       , attoparsec
-                       , base
-                       , bytestring
-                       , cardano-sl
-                       , cardano-sl-chain
-                       , cardano-sl-core
-                       , cardano-sl-infra
-                       , cardano-sl-chain
-                       , cardano-sl-util
-                       , containers
-                       , cassava
-                       , directory
-                       , fgl
-                       , filepath
-                       , foldl
-                       , graphviz
-                       , optparse-applicative
-                       , pipes
-                       , pipes-bytestring
-                       , pipes-interleave
-                       , pipes-safe
-                       , process
-                       , random
-                       , text
-                       , time-units
-                       , universum >= 0.1.11
-  else
-    buildable: False
-  default-language:    Haskell2010
-  ghc-options:         -threaded
-                       -Wall
-                       -O2
-  -- linker speed up for linux
-  if os(linux)
-    ghc-options:       -optl-fuse-ld=gold
-    ld-options:        -fuse-ld=gold
-
-  default-extensions:   DeriveDataTypeable
-                        DeriveGeneric
-                        GeneralizedNewtypeDeriving
-                        StandaloneDeriving
-                        FlexibleContexts
-                        FlexibleInstances
-                        MultiParamTypeClasses
-                        FunctionalDependencies
-                        DefaultSignatures
-                        NoImplicitPrelude
-                        OverloadedStrings
-                        RecordWildCards
-                        TypeApplications
-                        TupleSections
-                        ViewPatterns
-                        LambdaCase
-                        MultiWayIf
-                        ConstraintKinds
-                        UndecidableInstances
-                        ScopedTypeVariables
-                        ScopedTypeVariables
-                        BangPatterns
-                        MonadFailDesugaring
 
 executable cardano-blockchain-analyser
   hs-source-dirs:      src/blockchain-analyser
@@ -455,8 +293,7 @@ executable cardano-blockchain-analyser
     ghc-options:       -optl-fuse-ld=gold
     ld-options:        -fuse-ld=gold
 
-  default-extensions:   RecordWildCards
-                        NoImplicitPrelude
+  default-extensions:   NoImplicitPrelude
                         OverloadedStrings
                         TypeApplications
                         ScopedTypeVariables
@@ -472,31 +309,16 @@ executable cardano-blockchain-analyser
 executable cardano-x509-certificates
   hs-source-dirs: src/gencerts
   main-is: Main.hs
-  other-modules: Data.X509.Extra
-               , Configuration
 
   build-depends: base >=4.7 && <5
-               , aeson
-               , asn1-encoding
-               , asn1-types
-               , bytestring
-               , base64-bytestring
-               , cryptonite
+               , cardano-sl-x509
                , filepath
-               , hourglass
                , optparse-applicative
                , universum
-               , unordered-containers
-               , x509
-               , x509-validation
-               , x509-store
-               , data-default-class
-               , yaml
 
   default-extensions:   DeriveGeneric
                         NoImplicitPrelude
                         OverloadedStrings
-                        RecordWildCards
                         TupleSections
                         TypeApplications
 
@@ -537,47 +359,19 @@ library
                        Pos.Tools.Launcher.Environment
                        Pos.Tools.Launcher.Logging
 
-                       -- Dbgen
-                       Pos.Tools.Dbgen.CLI
-                       Pos.Tools.Dbgen.Lib
-                       Pos.Tools.Dbgen.Rendering
-                       Pos.Tools.Dbgen.Stats
-                       Pos.Tools.Dbgen.Types
-
-  build-depends:       aeson
-                     , base >= 4.7 && < 5
-                     , acid-state-exts
+  build-depends:       base >= 4.7 && < 5
                      , aeson
-                     , ansi-terminal
-                     , bytestring
-                     , cardano-sl
-                     , cardano-sl-client
-                     , cardano-sl-core
-                     , cardano-sl-core-test
-                     , cardano-sl-db
-                     , cardano-sl-infra
-                     , cardano-sl-networking
-                     , cardano-sl-chain
-                     , cardano-sl-util
-                     , cardano-sl-wallet
                      , containers
                      , data-default
                      , directory
                      , filepath
-                     , log-warper
                      , network-transport-tcp >= 0.6
-                     , optparse-applicative
-                     , optparse-generic
                      , parsers
-                     , QuickCheck
-                     , stm
-                     , string-conv
                      , text
-                     , time
-                     , time-units
                      , trifecta
                      , universum >= 0.1.11
-                     , unordered-containers
+
+  default-extensions:   NoImplicitPrelude
 
 test-suite cardano-sl-tools-test
   main-is:             Test.hs
@@ -588,21 +382,14 @@ test-suite cardano-sl-tools-test
                        -- Subject
                        Test.Pos.Tools.Launcher.Environment
 
-                       -- Dbgen Tests
-                       Test.Pos.Tools.Dbgen.Gen
-                       Test.Pos.Tools.Dbgen.Json
-
   type:                exitcode-stdio-1.0
   build-depends:       aeson
                      , base
-                     , cardano-sl-binary-test
                      , cardano-sl-tools
                      , cardano-sl-util-test
                      , directory
-                     , hedgehog
                      , hspec
                      , temporary
-                     , universum
 
   hs-source-dirs:      test
   default-language:    Haskell2010

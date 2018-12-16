@@ -34,9 +34,10 @@ import           Formatting (Format, bprint, build, int, (%))
 import qualified Formatting.Buildable
 import qualified Text.JSON.Canonical as Canonical (FromJSON (..),
                      ReportSchemaErrors, ToJSON (..))
+import           Web.HttpApiData (FromHttpApiData (..), ToHttpApiData (..))
 
 import           Pos.Binary.Class (Bi (..))
-import           Pos.Core.Genesis.Canonical ()
+import           Pos.Util.Json.Canonical ()
 import           Pos.Util.Util (leftToPanic)
 
 -- | Coin is the least possible unit of currency.
@@ -67,6 +68,15 @@ instance Aeson.FromJSON Coin where
 
 instance Aeson.ToJSON Coin where
     toJSON = Aeson.toJSON . unsafeGetCoin
+
+instance FromHttpApiData Coin where
+    parseUrlPiece p = do
+        c <- Coin <$> parseQueryParam p
+        checkCoin c
+        pure c
+
+instance ToHttpApiData Coin where
+    toQueryParam = pretty . coinToInteger
 
 -- | Maximal possible value of 'Coin'.
 maxCoinVal :: Word64

@@ -6,7 +6,8 @@ module Pos.DB.Lrc.Lrc
 
 import           Universum
 
-import           Pos.Core (SlotCount)
+import           Pos.Chain.Genesis as Genesis (Config (..),
+                     configBlockVersionData, configFtsSeed)
 import           Pos.DB.Class (MonadDB)
 import           Pos.DB.Error (DBError (..))
 import           Pos.DB.Lrc.Common (prepareLrcCommon)
@@ -18,13 +19,17 @@ import           Pos.DB.Lrc.Seed (prepareLrcSeed)
 import           Pos.Util (maybeThrow)
 
 -- | Put missing initial data into LRC DB.
-prepareLrcDB :: MonadDB m => SlotCount -> m ()
-prepareLrcDB epochSlots = do
-    prepareLrcLeaders epochSlots
-    prepareLrcRichmen
+prepareLrcDB :: MonadDB m => Genesis.Config -> m ()
+prepareLrcDB genesisConfig = do
+    prepareLrcLeaders genesisConfig
+    prepareLrcRichmen genesisConfig
     let cantReadErr =
             DBMalformed "Can't read richmen US after richmen initialization"
-    totalStake <- fst <$> (maybeThrow cantReadErr =<< tryGetUSRichmen 0)
+    totalStake <-
+        fst
+            <$> (   maybeThrow cantReadErr
+                =<< tryGetUSRichmen (configBlockVersionData genesisConfig) 0
+                )
     prepareLrcIssuers totalStake
-    prepareLrcSeed
+    prepareLrcSeed (configFtsSeed genesisConfig)
     prepareLrcCommon

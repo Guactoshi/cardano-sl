@@ -1,4 +1,5 @@
-{-# LANGUAGE NamedFieldPuns #-}
+{-# LANGUAGE NamedFieldPuns  #-}
+{-# LANGUAGE RecordWildCards #-}
 
 -- | Update system related functionality in Auxx.
 
@@ -15,8 +16,6 @@ import           Data.Default (def)
 import qualified Data.HashMap.Strict as HM
 import           Data.List ((!!))
 import           Formatting (sformat, string, (%))
-import           System.Wlog (CanLog, HasLoggerName, logDebug, logError,
-                     logInfo)
 
 import           Pos.Binary (Raw)
 import           Pos.Chain.Update (SystemTag, UpId, UpdateData (..),
@@ -28,6 +27,7 @@ import           Pos.Crypto (Hash, ProtocolMagic, emptyPassphrase, hash,
                      hashHexF, unsafeHash, withSafeSigner, withSafeSigners)
 import           Pos.Infra.Diffusion.Types (Diffusion (..))
 import           Pos.Network.Update.Download (installerHash)
+import           Pos.Util.Wlog (WithLogger, logDebug, logError, logInfo)
 
 import           Lang.Value (ProposeUpdateParams (..), ProposeUpdateSystem (..))
 import           Mode (MonadAuxxMode)
@@ -104,7 +104,7 @@ updateDataElement ProposeUpdateSystem{..} = do
 dummyHash :: Hash Raw
 dummyHash = unsafeHash (0 :: Integer)
 
-hashFile :: (CanLog m, HasLoggerName m, MonadIO m) => Maybe FilePath -> m (Hash Raw)
+hashFile :: (WithLogger m, MonadIO m) => Maybe FilePath -> m (Hash Raw)
 hashFile Nothing  = pure dummyHash
 hashFile (Just filename) = do
     fileData <- liftIO $ BSL.readFile filename

@@ -27,14 +27,16 @@ import qualified Data.HashMap.Strict as HM
 import qualified Data.HashSet as HS
 
 import           Pos.Binary.Class (Bi)
+import           Pos.Chain.Delegation (ProxySKHeavy)
+import           Pos.Chain.Genesis as Genesis (Config (..),
+                     configBlockVersionData)
+import           Pos.Chain.Genesis (GenesisData, gdHeavyDelegation,
+                     unGenesisDelegation)
 import           Pos.Chain.Lrc (FullRichmenData, RichmenComponent (..),
                      findDelegationStakes, findRichmenStakes)
 import           Pos.Chain.Txp (genesisStakes)
 import           Pos.Core (Coin, CoinPortion, StakeholderId, addressHash,
-                     applyCoinPortionUp, genesisData, sumCoins,
-                     unsafeIntegerToCoin)
-import           Pos.Core.Delegation (ProxySKHeavy)
-import           Pos.Core.Genesis (gdHeavyDelegation, unGenesisDelegation)
+                     applyCoinPortionUp, sumCoins, unsafeIntegerToCoin)
 import           Pos.Crypto (pskDelegatePk)
 import           Pos.DB.Class (MonadDB)
 import           Pos.DB.Lrc.Consumer.Delegation (dlgRichmenComponent,
@@ -48,21 +50,27 @@ import           Pos.DB.Lrc.RichmenBase (getRichmen, putRichmen)
 -- Initialization
 ----------------------------------------------------------------------------
 
-prepareLrcRichmen :: MonadDB m => m ()
-prepareLrcRichmen = do
-    prepareLrcRichmenDo sscRichmenComponent
-    prepareLrcRichmenDo updateRichmenComponent
-    prepareLrcRichmenDo dlgRichmenComponent
+prepareLrcRichmen :: MonadDB m => Genesis.Config -> m ()
+prepareLrcRichmen genesisConfig = do
+    prepareLrcRichmenDo genesisData (sscRichmenComponent genesisBvd)
+    prepareLrcRichmenDo genesisData (updateRichmenComponent genesisBvd)
+    prepareLrcRichmenDo genesisData (dlgRichmenComponent genesisBvd)
+  where
+    genesisData = configGenesisData genesisConfig
+    genesisBvd  = configBlockVersionData genesisConfig
 
 prepareLrcRichmenDo
-    :: (Bi richmenData, MonadDB m) => RichmenComponent richmenData -> m ()
-prepareLrcRichmenDo rc =
+    :: (Bi richmenData, MonadDB m)
+    => GenesisData
+    -> RichmenComponent richmenData
+    -> m ()
+prepareLrcRichmenDo genesisData rc =
     whenNothingM_ (getRichmen rc 0) . putRichmen rc 0 $ computeInitial
         genesisDistribution
         genesisDelegation
         rc
   where
-    genesisDistribution = HM.toList genesisStakes
+    genesisDistribution = HM.toList $ genesisStakes genesisData
     genesisDelegation   = unGenesisDelegation $ gdHeavyDelegation genesisData
 
 computeInitial

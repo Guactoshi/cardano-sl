@@ -1,8 +1,11 @@
+{-# LANGUAGE RecordWildCards #-}
+
 -- | Types used for block processing: most importantly, 'Undo' and 'Blund'.
 
 module Pos.Chain.Block.Types
        ( SlogUndo (..)
        , Undo (..)
+       , buildUndo
        , Blund
 
        , LastKnownHeader
@@ -12,17 +15,17 @@ module Pos.Chain.Block.Types
 
 import           Universum
 
-import           Formatting (bprint, build, (%))
-import qualified Formatting.Buildable
+import           Formatting (Format, bprint, build, later, (%))
 import           Serokell.Util.Text (listJson)
 
 import           Pos.Binary.Class (Cons (..), Field (..), deriveSimpleBi)
-import           Pos.Chain.Block.Slog.Types (SlogUndo (..))
+import           Pos.Chain.Block.Block (Block)
+import           Pos.Chain.Block.Header (BlockHeader, HasHeaderHash (..))
+import           Pos.Chain.Block.Slog.Types (SlogUndo (..), buildSlogUndo)
 import           Pos.Chain.Delegation (DlgUndo)
+import           Pos.Chain.Txp (TxpUndo)
 import           Pos.Chain.Update (USUndo)
-import           Pos.Core (HasConfiguration, HasDifficulty (..))
-import           Pos.Core.Block (Block, BlockHeader, HasHeaderHash (..))
-import           Pos.Core.Txp (TxpUndo)
+import           Pos.Core (HasDifficulty (..), SlotCount)
 import           Pos.Util.Util (HasLens (..))
 
 -- | Structure for undo block during rollback
@@ -38,14 +41,14 @@ instance NFData Undo
 -- | Block and its Undo.
 type Blund = (Block, Undo)
 
-instance HasConfiguration => Buildable Undo where
-    build Undo{..} =
-        bprint ("Undo:\n"%
-                "  undoTx: "%listJson%"\n"%
-                "  undoDlg: "%build%"\n"%
-                "  undoUS: "%build%"\n"%
-                "  undoSlog: "%build)
-               (map (bprint listJson) undoTx) undoDlg undoUS undoSlog
+buildUndo :: SlotCount -> Format r (Undo -> r)
+buildUndo epochSlots = later $ \Undo{..} ->
+    bprint ("Undo:\n"%
+            "  undoTx: "%listJson%"\n"%
+            "  undoDlg: "%build%"\n"%
+            "  undoUS: "%build%"\n"%
+            "  undoSlog: "%buildSlogUndo epochSlots)
+            (map (bprint listJson) undoTx) undoDlg undoUS undoSlog
 
 instance HasDifficulty Blund where
     difficultyL = _1 . difficultyL

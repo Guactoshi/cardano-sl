@@ -2,6 +2,8 @@
 
 {-# LANGUAGE AllowAmbiguousTypes #-}
 
+{-# OPTIONS_GHC -fno-warn-deprecations #-}
+
 module Test.Pos.Explorer.Socket.MethodsSpec
        ( spec
        ) where
@@ -15,12 +17,13 @@ import qualified Data.Map.Strict as M
 import qualified Data.Set as S
 import           Network.EngineIO (SocketId)
 
-import           Test.Hspec (Spec, anyException, describe, it, shouldBe,
-                     shouldThrow)
+import           Test.Hspec (Spec, anyException, beforeAll_, describe, it,
+                     shouldBe, shouldThrow)
 import           Test.Hspec.QuickCheck (modifyMaxSize, prop)
 import           Test.QuickCheck (Property, arbitrary, forAll)
 import           Test.QuickCheck.Monadic (assert, monadicIO, run)
 
+import           Pos.Core.NetworkMagic (NetworkMagic)
 import           Pos.Crypto (SecretKey)
 import           Pos.Explorer.ExplorerMode (runSubTestMode)
 import           Pos.Explorer.Socket.Holder (ConnectionsState,
@@ -37,6 +40,7 @@ import           Pos.Explorer.Socket.Methods (addrSubParam, addressSetByTxs,
                      unsubscribeTxs)
 import           Pos.Explorer.TestUtil (secretKeyToAddress)
 import           Pos.Explorer.Web.ClientTypes (CAddress (..), toCAddress)
+import           Pos.Util.Wlog (setupTestLogging)
 
 import           Test.Pos.Explorer.MockFactory (mkTxOut)
 
@@ -48,7 +52,7 @@ import           Test.Pos.Explorer.MockFactory (mkTxOut)
 -- stack test cardano-sl-explorer --fast --test-arguments "-m Test.Pos.Explorer.Socket"
 
 spec :: Spec
-spec =
+spec = beforeAll_ setupTestLogging $ do
     describe "Methods" $ do
         describe "fromCAddressOrThrow" $
             it "throws an exception if a given CAddress is invalid" $
@@ -110,11 +114,11 @@ spec =
                     unsubscribeFullyProp
 
 
-addressSetByTxsProp :: SecretKey -> Bool
-addressSetByTxsProp key =
+addressSetByTxsProp :: NetworkMagic -> SecretKey -> Bool
+addressSetByTxsProp nm key =
     let
-        addrA = secretKeyToAddress key
-        addrB = secretKeyToAddress key
+        addrA = secretKeyToAddress nm key
+        addrB = secretKeyToAddress nm key
         txA = mkTxOut 2 addrA
         txB = mkTxOut 3 addrA
         txC = mkTxOut 4 addrB

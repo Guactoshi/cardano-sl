@@ -25,17 +25,17 @@ import qualified Data.HashMap.Strict as HM
 import           UnliftIO (MonadUnliftIO)
 
 import           Pos.Binary.Class (biSize)
+import           Pos.Chain.Block (headerHash)
 import           Pos.Chain.Delegation (DlgMemPool, DlgPayload (..),
-                     MonadDelegation, cmPskMods, dwMessageCache, dwPoolSize,
-                     dwProxySKPool, dwTip, emptyCedeModifier, isRevokePsk,
-                     pskToDlgEdgeAction)
+                     MonadDelegation, ProxySKHeavy, cmPskMods, dwMessageCache,
+                     dwPoolSize, dwProxySKPool, dwTip, emptyCedeModifier,
+                     isRevokePsk, pskToDlgEdgeAction)
+import           Pos.Chain.Genesis as Genesis (Config (..),
+                     configBlockVersionData)
+import           Pos.Chain.Update (bvdMaxBlockSize)
 import           Pos.Core (addressHash, epochIndexL)
-import           Pos.Core.Block (headerHash)
 import           Pos.Core.Conc (currentTime)
-import           Pos.Core.Delegation (ProxySKHeavy)
-import           Pos.Core.StateLock (StateLock, withStateLockNoMetrics)
-import           Pos.Core.Update (bvdMaxBlockSize)
-import           Pos.Crypto (ProtocolMagic, ProxySecretKey (..), PublicKey)
+import           Pos.Crypto (ProxySecretKey (..), PublicKey)
 import           Pos.DB (MonadDBRead, MonadGState)
 import qualified Pos.DB as DB
 import           Pos.DB.Delegation.Cede.Holders (evalMapCede)
@@ -43,6 +43,7 @@ import           Pos.DB.Delegation.Cede.Logic (CheckForCycle (..),
                      dlgVerifyPskHeavy)
 import           Pos.DB.Delegation.Logic.Common (DelegationStateAction,
                      runDelegationStateAction)
+import           Pos.DB.GState.Lock (StateLock, withStateLockNoMetrics)
 import           Pos.DB.Lrc (HasLrcContext, getDlgRichmen)
 import           Pos.Util (HasLens', microsecondsToUTC)
 import           Pos.Util.Concurrent.PriorityLock (Priority (..))
@@ -128,25 +129,27 @@ processProxySKHeavy
        , HasLens' ctx StateLock
        , MonadMask m
        )
-    => ProtocolMagic -> ProxySKHeavy -> m PskHeavyVerdict
-processProxySKHeavy pm psk =
+    => Genesis.Config -> ProxySKHeavy -> m PskHeavyVerdict
+processProxySKHeavy genesisConfig psk =
     withStateLockNoMetrics LowPriority $ \_stateLockHeader ->
-        processProxySKHeavyInternal pm psk
+        processProxySKHeavyInternal genesisConfig psk
 
 -- | Main logic of heavy psk processing, doesn't have
 -- synchronization. Should be called __only__ if you are sure that
 -- 'StateLock' is taken already.
 processProxySKHeavyInternal ::
        forall ctx m. (ProcessHeavyConstraint ctx m)
-    => ProtocolMagic
+    => Genesis.Config
     -> ProxySKHeavy
     -> m PskHeavyVerdict
-processProxySKHeavyInternal pm psk = do
+processProxySKHeavyInternal genesisConfig psk = do
     curTime <- microsecondsToUTC <$> currentTime
     dbTip <- DB.getTipHeader
     let dbTipHash = headerHash dbTip
     let headEpoch = dbTip ^. epochIndexL
-    richmen <- getDlgRichmen "Delegation.Logic#processProxySKHeavy" headEpoch
+    richmen <- getDlgRichmen (configBlockVersionData genesisConfig)
+                             "Delegation.Logic#processProxySKHeavy"
+                             headEpoch
     maxBlockSize <- bvdMaxBlockSize <$> DB.gsAdoptedBVData
     let iPk = pskIssuerPk psk
 
@@ -169,7 +172,11 @@ processProxySKHeavyInternal pm psk = do
                      (const (error "processProxySKHeavyInternal:can't happen",True))) $
         evalMapCede cedeModifier $
         runExceptT $
-        dlgVerifyPskHeavy pm richmen (CheckForCycle True) headEpoch psk
+        dlgVerifyPskHeavy (configProtocolMagic genesisConfig)
+                          richmen
+                          (CheckForCycle True)
+                          headEpoch
+                          psk
 
     -- Here the memory state is the same.
     runDelegationStateAction $ do

@@ -25,19 +25,18 @@ import qualified Data.Text as T
 import           Formatting (build, int, sformat, (%))
 import           Serokell.Util.Text (listJson)
 import           Serokell.Util.Verify (VerificationRes (..))
-import           System.Wlog (WithLogger, logDebug)
 import           UnliftIO (MonadUnliftIO)
 
-import           Pos.Chain.Block (VerifyHeaderParams (..), verifyHeader)
-import           Pos.Core (blkSecurityParam, difficultyL, epochIndexL,
-                     getEpochOrSlot)
-import           Pos.Core.Block (BlockHeader (..), HeaderHash, headerHash,
-                     headerHashG, headerSlotL, prevBlockL)
+import           Pos.Chain.Block (BlockHeader (..), HeaderHash,
+                     VerifyHeaderParams (..), headerHash, headerHashG,
+                     headerSlotL, prevBlockL, verifyHeader)
+import           Pos.Chain.Genesis as Genesis (Config (..),
+                     configBlkSecurityParam, configEpochSlots)
+import           Pos.Chain.Update (bvdMaxHeaderSize)
+import           Pos.Core (difficultyL, epochIndexL, getEpochOrSlot)
 import           Pos.Core.Chrono (NE, NewestFirst, OldestFirst (..),
                      toNewestFirst, toOldestFirst, _NewestFirst, _OldestFirst)
 import           Pos.Core.Slotting (MonadSlots (getCurrentSlot))
-import           Pos.Core.Update (bvdMaxHeaderSize)
-import           Pos.Crypto.Configuration (ProtocolMagic)
 import           Pos.DB (MonadDBRead)
 import qualified Pos.DB.Block.GState.BlockExtra as GS
 import           Pos.DB.Block.Load (loadHeadersByDepth)
@@ -46,6 +45,7 @@ import           Pos.DB.Delegation (dlgVerifyHeader, runDBCede)
 import qualified Pos.DB.GState.Common as GS (getTip)
 import qualified Pos.DB.Lrc as LrcDB
 import           Pos.DB.Update (getAdoptedBVFull)
+import           Pos.Util.Wlog (WithLogger, logDebug)
 
 -- | Result of single (new) header classification.
 data ClassifyHeaderRes
@@ -76,11 +76,11 @@ classifyNewHeader
     , MonadDBRead m
     , MonadUnliftIO m
     )
-    => ProtocolMagic -> BlockHeader -> m ClassifyHeaderRes
+    => Genesis.Config -> BlockHeader -> m ClassifyHeaderRes
 -- Genesis headers seem useless, we can create them by ourselves.
 classifyNewHeader _ (BlockHeaderGenesis _) = pure $ CHUseless "genesis header is useless"
-classifyNewHeader pm (BlockHeaderMain header) = fmap (either identity identity) <$> runExceptT $ do
-    curSlot <- getCurrentSlot
+classifyNewHeader genesisConfig (BlockHeaderMain header) = fmap (either identity identity) <$> runExceptT $ do
+    curSlot <- getCurrentSlot $ configEpochSlots genesisConfig
     tipHeader <- lift DB.getTipHeader
     let tipEoS = getEpochOrSlot tipHeader
     let newHeaderEoS = getEpochOrSlot header
@@ -122,6 +122,7 @@ classifyNewHeader pm (BlockHeaderMain header) = fmap (either identity identity) 
                     , vhpMaxSize = Just maxBlockHeaderSize
                     , vhpVerifyNoUnknown = False
                     }
+            let pm = configProtocolMagic genesisConfig
             case verifyHeader pm vhp (BlockHeaderMain header) of
                 VerFailure errors -> throwError $ mkCHRinvalid (NE.toList errors)
                 _                 -> pass
@@ -214,16 +215,20 @@ getHeadersFromManyTo mLimit checkpoints startM = runExceptT $ do
 -- exponentially base 2 relatively to the depth in the blockchain.
 getHeadersOlderExp
     :: MonadDBRead m
-    => Maybe HeaderHash -> m (OldestFirst NE HeaderHash)
-getHeadersOlderExp upto = do
+    => Genesis.Config
+    -> Maybe HeaderHash
+    -> m (OldestFirst NE HeaderHash)
+getHeadersOlderExp genesisConfig upto = do
     tip <- GS.getTip
     let upToReal = fromMaybe tip upto
     -- Using 'blkSecurityParam + 1' because fork can happen on k+1th one.
-    (allHeaders :: NewestFirst [] BlockHeader) <-
-        -- loadHeadersByDepth always returns nonempty list unless you
-        -- pass depth 0 (we pass k+1). It throws if upToReal is
-        -- absent. So it either throws or returns nonempty.
-        loadHeadersByDepth (blkSecurityParam + 1) upToReal
+    -- loadHeadersByDepth always returns nonempty list unless you
+    -- pass depth 0 (we pass k+1). It throws if upToReal is
+    -- absent. So it either throws or returns nonempty.
+    (allHeaders :: NewestFirst [] BlockHeader) <- loadHeadersByDepth
+        (configGenesisHash genesisConfig)
+        (configBlkSecurityParam genesisConfig + 1)
+        upToReal
     let toNE = fromMaybe (error "getHeadersOlderExp: couldn't create nonempty") .
                nonEmpty
     let selectedHashes :: NewestFirst [] HeaderHash

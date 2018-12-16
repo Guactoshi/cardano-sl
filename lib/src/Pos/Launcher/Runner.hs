@@ -1,6 +1,7 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE CPP                 #-}
 {-# LANGUAGE RankNTypes          #-}
+{-# LANGUAGE RecordWildCards     #-}
 
 -- | Runners in various modes.
 
@@ -8,10 +9,9 @@ module Pos.Launcher.Runner
        ( -- * High level runners
          runRealMode
 
-       , elimRealMode
-
        -- * Exported for custom usage in CLI utils
        , runServer
+       , elimRealMode
        ) where
 
 import           Universum
@@ -25,15 +25,14 @@ import           Pos.Behavior (bcSecurityParams)
 import           Pos.Binary ()
 import           Pos.Chain.Block (HasBlockConfiguration, recoveryHeadersMessage,
                      streamWindow)
+import           Pos.Chain.Genesis as Genesis (Config (..))
 import           Pos.Chain.Txp (TxpConfiguration)
-import           Pos.Chain.Update (HasUpdateConfiguration,
-                     lastKnownBlockVersion)
+import           Pos.Chain.Update (UpdateConfiguration, lastKnownBlockVersion,
+                     updateConfiguration)
 import           Pos.Configuration (HasNodeConfiguration,
                      networkConnectionTimeout)
 import           Pos.Context.Context (NodeContext (..))
 import           Pos.Core (StakeholderId, addressHash)
-import           Pos.Core.Configuration (HasProtocolConstants,
-                     protocolConstants)
 import           Pos.Core.JsonLog (jsonLog)
 import           Pos.Crypto (ProtocolMagic, toPublic)
 import           Pos.DB.Txp (MonadTxpLocal)
@@ -41,6 +40,7 @@ import           Pos.Diffusion.Full (FullDiffusionConfiguration (..),
                      diffusionLayerFull)
 import           Pos.Infra.Diffusion.Types (Diffusion (..), DiffusionLayer (..),
                      hoistDiffusion)
+import           Pos.Infra.InjectFail (FInject (..), testLogFInject)
 import           Pos.Infra.Network.Types (NetworkConfig (..),
                      topologyRoute53HealthCheckEnabled)
 import           Pos.Infra.Reporting.Ekg (EkgNodeMetrics (..),
@@ -76,45 +76,50 @@ runRealMode
        -- explorer and wallet use RealMode,
        -- though they should use only @RealModeContext@
        )
-    => ProtocolMagic
+    => UpdateConfiguration
+    -> Genesis.Config
     -> TxpConfiguration
     -> NodeResources ext
     -> (Diffusion (RealMode ext) -> RealMode ext a)
     -> IO a
-runRealMode pm txpConfig nr@NodeResources {..} act = runServer
-    pm
-    ncNodeParams
-    (EkgNodeMetrics nrEkgStore)
-    ncShutdownContext
-    makeLogicIO
-    act'
+runRealMode uc genesisConfig txpConfig nr@NodeResources {..} act =
+    runServer
+        updateConfiguration
+        genesisConfig
+        ncNodeParams
+        (EkgNodeMetrics nrEkgStore)
+        ncShutdownContext
+        makeLogicIO
+        act'
   where
     NodeContext {..} = nrContext
-    NodeParams {..} = ncNodeParams
-    securityParams = bcSecurityParams npBehaviorConfig
+    NodeParams {..}  = ncNodeParams
+    securityParams   = bcSecurityParams npBehaviorConfig
     ourStakeholderId :: StakeholderId
     ourStakeholderId = addressHash (toPublic npSecretKey)
     logic :: Logic (RealMode ext)
-    logic = logicFull pm txpConfig ourStakeholderId securityParams jsonLog
+    logic = logicFull genesisConfig txpConfig ourStakeholderId securityParams jsonLog
+    pm = configProtocolMagic genesisConfig
     makeLogicIO :: Diffusion IO -> Logic IO
-    makeLogicIO diffusion = hoistLogic (elimRealMode pm nr diffusion) logic
+    makeLogicIO diffusion = hoistLogic (elimRealMode uc pm nr diffusion) logic
     act' :: Diffusion IO -> IO a
     act' diffusion =
-        let diffusion' = hoistDiffusion liftIO (elimRealMode pm nr diffusion) diffusion
-         in elimRealMode pm nr diffusion (act diffusion')
+        let diffusion' = hoistDiffusion liftIO (elimRealMode uc pm nr diffusion) diffusion
+         in elimRealMode uc pm nr diffusion (act diffusion')
 
 -- | RealMode runner: creates a JSON log configuration and uses the
 -- resources provided to eliminate the RealMode, yielding an IO.
 elimRealMode
     :: forall t ext
      . HasCompileInfo
-    => ProtocolMagic
+    => UpdateConfiguration
+    -> ProtocolMagic
     -> NodeResources ext
     -> Diffusion IO
     -> RealMode ext t
     -> IO t
-elimRealMode pm NodeResources {..} diffusion action = do
-    Mtl.runReaderT action (rmc nrJsonLogConfig)
+elimRealMode uc pm NodeResources {..} diffusion action = do
+    Mtl.runReaderT action rmc
   where
     NodeContext {..} = nrContext
     NodeParams {..} = ncNodeParams
@@ -127,15 +132,16 @@ elimRealMode pm NodeResources {..} diffusion action = do
         , prpTrace           = wlogTrace "reporter"
         , prpProtocolMagic   = pm
         }
-    rmc jlConf = RealModeContext
+    rmc = RealModeContext
         nrDBs
         nrSscState
         nrTxpState
         nrDlgState
-        jlConf
+        nrJsonLogConfig
         lpDefaultName
         nrContext
         (productionReporter reporterParams diffusion)
+        uc
 
 -- | "Batteries-included" server.
 -- Bring up a full diffusion layer over a TCP transport and use it to run some
@@ -145,20 +151,17 @@ elimRealMode pm NodeResources {..} diffusion action = do
 -- network connection timeout (nt-tcp), and, and the 'recoveryHeadersMessage'
 -- number.
 runServer
-    :: forall t .
-       ( HasProtocolConstants
-       , HasBlockConfiguration
-       , HasNodeConfiguration
-       , HasUpdateConfiguration
-       )
-    => ProtocolMagic
+    :: forall t
+     . (HasBlockConfiguration, HasNodeConfiguration)
+    => UpdateConfiguration
+    -> Genesis.Config
     -> NodeParams
     -> EkgNodeMetrics
     -> ShutdownContext
     -> (Diffusion IO -> Logic IO)
     -> (Diffusion IO -> IO t)
     -> IO t
-runServer pm NodeParams {..} ekgNodeMetrics shdnContext mkLogic act = exitOnShutdown $
+runServer uc genesisConfig NodeParams {..} ekgNodeMetrics shdnContext mkLogic act = exitOnShutdown npFInjects $
     diffusionLayerFull fdconf
                        npNetworkConfig
                        (Just ekgNodeMetrics)
@@ -174,17 +177,21 @@ runServer pm NodeParams {..} ekgNodeMetrics shdnContext mkLogic act = exitOnShut
 
   where
     fdconf = FullDiffusionConfiguration
-        { fdcProtocolMagic = pm
-        , fdcProtocolConstants = protocolConstants
+        { fdcProtocolMagic = configProtocolMagic genesisConfig
+        , fdcProtocolConstants = configProtocolConstants genesisConfig
         , fdcRecoveryHeadersMessage = recoveryHeadersMessage
-        , fdcLastKnownBlockVersion = lastKnownBlockVersion
+        , fdcLastKnownBlockVersion = lastKnownBlockVersion uc
         , fdcConvEstablishTimeout = networkConnectionTimeout
         , fdcTrace = wlogTrace "diffusion"
         , fdcStreamWindow = streamWindow
         }
-    exitOnShutdown action = do
+    exitOnShutdown fInjects action = do
         _ <- race (waitForShutdown shdnContext) action
-        exitWith (ExitFailure 20) -- special exit code to indicate an update
+        doFail <- testLogFInject fInjects FInjApplyUpdateWrongExitCode
+        exitWith $ ExitFailure $
+          if doFail
+          then 42 -- inject wrong exit code
+          else 20 -- special exit code to indicate an update
     ekgStore = enmStore ekgNodeMetrics
     (hcHost, hcPort) = case npRoute53Params of
         Nothing         -> ("127.0.0.1", 3030)

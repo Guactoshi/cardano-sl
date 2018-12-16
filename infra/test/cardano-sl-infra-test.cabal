@@ -1,5 +1,5 @@
 name:                cardano-sl-infra-test
-version:             1.3.0
+version:             2.0.0
 synopsis:            Cardano SL - generators for cardano-sl-infra
 description:         This package contains generators for the infrastructural data types used in Cardano SL.
 license:             MIT
@@ -23,12 +23,12 @@ library
                        Test.Pos.Infra.Diffusion.Subscription.StatusSpec
                        Test.Pos.Infra.Diffusion.Subscription.SubscriptionSpec
                        Test.Pos.Infra.Gen
+                       Test.Pos.Infra.Json
 
   build-depends:       QuickCheck
                      , async
                      , base
                      , bytestring
-                     , cardano-sl-binary
                      , cardano-sl-binary-test
                      , cardano-sl-chain
                      , cardano-sl-chain-test
@@ -37,13 +37,17 @@ library
                      , cardano-sl-crypto
                      , cardano-sl-crypto-test
                      , cardano-sl-infra
+                     , cardano-sl-networking
                      , cardano-sl-util-test
                      , containers
+                     , dns
                      , generic-arbitrary
                      , hedgehog
                      , hspec
+                     , iproute
                      , kademlia
                      , universum
+                     , yaml
 
   default-language:    Haskell2010
 

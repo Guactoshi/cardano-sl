@@ -1,5 +1,6 @@
-{-# LANGUAGE CPP        #-}
-{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE CPP             #-}
+{-# LANGUAGE RankNTypes      #-}
+{-# LANGUAGE RecordWildCards #-}
 
 -- | High-level scenarios which can be launched.
 
@@ -14,17 +15,18 @@ import           Universum
 import qualified Data.HashMap.Strict as HM
 import           Formatting (bprint, build, int, sformat, shown, (%))
 import           Serokell.Util (listJson)
-import           System.Wlog (WithLogger, askLoggerName, logInfo)
 
+import           Pos.Chain.Genesis as Genesis (Config (..),
+                     GenesisDelegation (..), GenesisWStakeholders (..),
+                     configBootStakeholders, configFtsSeed,
+                     configHeavyDelegation)
 import           Pos.Chain.Txp (TxpConfiguration, bootDustThreshold)
-import           Pos.Chain.Update (HasUpdateConfiguration, curSoftwareVersion,
+import           Pos.Chain.Update (UpdateConfiguration, curSoftwareVersion,
                      lastKnownBlockVersion, ourSystemTag)
 import           Pos.Context (getOurPublicKey)
-import           Pos.Core (addressHash, genesisData)
+import           Pos.Core (addressHash)
 import           Pos.Core.Conc (mapConcurrently)
-import           Pos.Core.Genesis (GenesisData (..), GenesisDelegation (..),
-                     GenesisWStakeholders (..), gdFtsSeed)
-import           Pos.Crypto (ProtocolMagic, pskDelegatePk)
+import           Pos.Crypto (pskDelegatePk)
 import qualified Pos.DB.BlockIndex as DB
 import qualified Pos.GState as GS
 import           Pos.Infra.Diffusion.Types (Diffusion)
@@ -34,6 +36,8 @@ import           Pos.Infra.Util.LogSafe (logInfoS)
 import           Pos.Launcher.Resource (NodeResources (..))
 import           Pos.Util.AssertMode (inAssertMode)
 import           Pos.Util.CompileInfo (HasCompileInfo, compileInfo)
+import           Pos.Util.Util (HasLens', lensOf)
+import           Pos.Util.Wlog (WithLogger, askLoggerName, logInfo)
 import           Pos.Worker (allWorkers)
 import           Pos.WorkMode.Class (WorkMode)
 
@@ -44,11 +48,12 @@ runNode'
        ( HasCompileInfo
        , WorkMode ctx m
        )
-    => NodeResources ext
-    -> [Diffusion m -> m ()]
-    -> [Diffusion m -> m ()]
+    => Genesis.Config
+    -> NodeResources ext
+    -> [ (Text, Diffusion m -> m ()) ]
+    -> [ (Text, Diffusion m -> m ()) ]
     -> Diffusion m -> m ()
-runNode' NodeResources {..} workers' plugins' = \diffusion -> do
+runNode' genesisConfig NodeResources {..} workers' plugins' = \diffusion -> do
     logInfo $ "Built with: " <> pretty compileInfo
     nodeStartMsg
     inAssertMode $ logInfo "Assert mode on"
@@ -57,14 +62,14 @@ runNode' NodeResources {..} workers' plugins' = \diffusion -> do
     logInfoS $ sformat ("My public key is: "%build%", pk hash: "%build)
         pk pkHash
 
-    let genesisStakeholders = gdBootStakeholders genesisData
+    let genesisStakeholders = configBootStakeholders genesisConfig
     logInfo $ sformat
         ("Genesis stakeholders ("%int%" addresses, dust threshold "%build%"): "%build)
         (length $ getGenesisWStakeholders genesisStakeholders)
         (bootDustThreshold genesisStakeholders)
         genesisStakeholders
 
-    let genesisDelegation = gdHeavyDelegation genesisData
+    let genesisDelegation = configHeavyDelegation genesisConfig
     let formatDlgPair (issuerId, delegateId) =
             bprint (build%" -> "%build) issuerId delegateId
     logInfo $ sformat ("GenesisDelegation (stakeholder ids): "%listJson)
@@ -72,33 +77,31 @@ runNode' NodeResources {..} workers' plugins' = \diffusion -> do
             $ HM.toList
             $ unGenesisDelegation genesisDelegation
 
-    firstGenesisHash <- GS.getFirstGenesisBlockHash
+    firstGenesisHash <- GS.getFirstGenesisBlockHash $ configGenesisHash
+        genesisConfig
     logInfo $ sformat
         ("First genesis block hash: "%build%", genesis seed is "%build)
         firstGenesisHash
-        (gdFtsSeed genesisData)
+        (configFtsSeed genesisConfig)
 
     tipHeader <- DB.getTipHeader
     logInfo $ sformat ("Current tip header: "%build) tipHeader
 
     waitSystemStart
-    let runWithReportHandler action =
-            action diffusion `catch` reportHandler
+    let
+      runWithReportHandler :: (Text, Diffusion m -> m ()) -> m ()
+      runWithReportHandler (workerName, action) = action diffusion `catch` (reportHandler workerName)
 
     void (mapConcurrently runWithReportHandler (workers' ++ plugins'))
 
     exitFailure
-
   where
-    -- FIXME shouldn't this kill the whole program?
-    -- FIXME: looks like something bad.
-    -- REPORT:ERROR Node's worker/plugin failed with exception (which wasn't caught)
-    reportHandler (SomeException e) = do
+    reportHandler :: Text -> SomeException -> m b
+    reportHandler action (SomeException e) = do
         loggerName <- askLoggerName
-        reportError $
-            sformat ("Worker/plugin with logger name "%shown%
-                    " failed with exception: "%shown)
-            loggerName e
+        let msg = "Worker/plugin with work name "%shown%" and logger name "%shown%" failed with exception: "%shown
+        reportError $ sformat msg action loggerName e
+        exitFailure
 
 -- | Entry point of full node.
 -- Initialization, running of workers, running of plugins.
@@ -106,21 +109,25 @@ runNode
     :: ( HasCompileInfo
        , WorkMode ctx m
        )
-    => ProtocolMagic
+    => Genesis.Config
     -> TxpConfiguration
     -> NodeResources ext
-    -> [Diffusion m -> m ()]
+    -> [ (Text, Diffusion m -> m ()) ]
     -> Diffusion m -> m ()
-runNode pm txpConfig nr plugins = runNode' nr workers' plugins
-  where
-    workers' = allWorkers pm txpConfig nr
+runNode genesisConfig txpConfig nr plugins =
+    runNode' genesisConfig nr workers' plugins
+    where workers' = allWorkers genesisConfig txpConfig nr
 
 -- | This function prints a very useful message when node is started.
-nodeStartMsg :: (HasUpdateConfiguration, WithLogger m) => m ()
-nodeStartMsg = logInfo msg
+nodeStartMsg
+    :: (MonadReader r m, HasLens' r UpdateConfiguration, WithLogger m)
+    => m ()
+nodeStartMsg = do
+    uc <- view (lensOf @UpdateConfiguration)
+    logInfo (msg uc)
   where
-    msg = sformat ("Application: " %build% ", last known block version "
+    msg uc = sformat ("Application: " %build% ", last known block version "
                     %build% ", systemTag: " %build)
-                   curSoftwareVersion
-                   lastKnownBlockVersion
-                   ourSystemTag
+                   (curSoftwareVersion uc)
+                   (lastKnownBlockVersion uc)
+                   (ourSystemTag uc)

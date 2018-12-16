@@ -1,3 +1,5 @@
+{-# LANGUAGE RecordWildCards #-}
+
 -- | In-memory state of LRC.
 
 module Pos.DB.Lrc.Context
@@ -15,7 +17,6 @@ module Pos.DB.Lrc.Context
 import           Universum
 
 import           Control.Lens (views)
-import           System.Wlog (WithLogger)
 
 import           Pos.Chain.Lrc (LrcError (..))
 import           Pos.Core (EpochIndex)
@@ -24,6 +25,7 @@ import           Pos.DB.Class (MonadDBRead)
 import           Pos.DB.Lrc.Common (getEpoch)
 import           Pos.Util.Concurrent (readTVarConditional)
 import           Pos.Util.Util (HasLens (..), HasLens', maybeThrow)
+import           Pos.Util.Wlog (WithLogger)
 
 data LrcContext = LrcContext
     { -- | Primitive for synchronization with LRC.

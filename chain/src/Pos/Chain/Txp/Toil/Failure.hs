@@ -1,5 +1,6 @@
-{-# LANGUAGE DataKinds      #-}
-{-# LANGUAGE DeriveAnyClass #-}
+{-# LANGUAGE DataKinds       #-}
+{-# LANGUAGE DeriveAnyClass  #-}
+{-# LANGUAGE RecordWildCards #-}
 
 -- | Toil failures.
 
@@ -17,13 +18,14 @@ import           GHC.TypeLits (TypeError)
 import           Serokell.Data.Memory.Units (Byte, memory)
 import           Serokell.Util (listJson)
 
+import           Pos.Chain.Block.Header (HeaderHash)
 import           Pos.Chain.Script (PlutusError)
 import           Pos.Chain.Txp.Toil.Types (TxFee)
+import           Pos.Chain.Txp.Tx (TxIn, TxOut (..))
+import           Pos.Chain.Txp.TxWitness (TxInWitness)
 import           Pos.Core (Address, ScriptVersion, TxFeePolicy,
                      addressDetailedF, addressF)
 import           Pos.Core.Attributes (UnparsedFields)
-import           Pos.Core.Block (HeaderHash)
-import           Pos.Core.Txp (TxIn, TxInWitness, TxOut (..))
 import           Pos.Util (DisallowException)
 
 ----------------------------------------------------------------------------
@@ -175,6 +177,8 @@ data TxOutVerFailure
     | TxOutUnknownAddressType Address
     -- | Can't send to a redeem address
     | TxOutRedeemAddressProhibited Address
+    -- | NetworkMagic's must match
+    | TxOutAddressBadNetworkMagic Address
     deriving (Show, Eq, Generic, NFData)
 
 instance Buildable TxOutVerFailure where
@@ -186,3 +190,7 @@ instance Buildable TxOutVerFailure where
     build (TxOutRedeemAddressProhibited addr) =
         bprint ("sends money to a redeem address ("
                 %addressF%"), this is prohibited") addr
+    build (TxOutAddressBadNetworkMagic addr) =
+        bprint ("sends money to an address with mismatched \
+                \NetworkMagic ("%addressF%"), this is prohibited")
+               addr

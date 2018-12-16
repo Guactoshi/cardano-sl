@@ -1,10 +1,11 @@
+{-# LANGUAGE RecordWildCards #-}
+
 -- | Delegation-related local types.
 
 module Pos.Chain.Delegation.Types
        ( DlgPayload (..)
        , DlgUndo (..)
        , DlgMemPool
-       , module Pos.Core.Delegation
        , isRevokePsk
 
        , DlgBlock
@@ -18,10 +19,10 @@ import qualified Formatting.Buildable as Buildable
 import           Serokell.Util.Text (listJson)
 
 import           Pos.Binary.Class (Cons (..), Field (..), deriveSimpleBi)
+import           Pos.Chain.Block.ComponentBlock (ComponentBlock (..))
+import           Pos.Chain.Delegation.HeavyDlgIndex (ProxySKHeavy)
+import           Pos.Chain.Delegation.Payload (DlgPayload (..))
 import           Pos.Core (StakeholderId)
-import           Pos.Core.Block (ComponentBlock (..))
-import           Pos.Core.Delegation (DlgPayload (..), ProxySKBlockInfo,
-                     ProxySKHeavy, checkDlgPayload)
 import           Pos.Crypto (ProxySecretKey, PublicKey, isSelfSignedPsk)
 
 -- | Undo for the delegation component.

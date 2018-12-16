@@ -1,7 +1,8 @@
-{-# LANGUAGE AllowAmbiguousTypes #-}
-
 {-# OPTIONS_GHC -fno-warn-unused-top-binds #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
+
+{-# LANGUAGE AllowAmbiguousTypes #-}
+{-# LANGUAGE RecordWildCards     #-}
 
 -- | Types that arise in the API: mostly simplified representations
 -- of the core types which are easier to serialize.
@@ -69,18 +70,18 @@ import           Servant.API (FromHttpApiData (..))
 import           Test.QuickCheck (Arbitrary (..))
 
 import           Pos.Binary (biSize)
-import           Pos.Chain.Block (Undo (..))
-import           Pos.Core (Address, Coin, EpochIndex, LocalSlotIndex,
+import           Pos.Chain.Block (MainBlock, Undo (..), gbHeader, gbhConsensus,
+                     headerHash, mainBlockSlot, mainBlockTxPayload, mcdSlot,
+                     prevBlockL)
+import           Pos.Chain.Txp (Tx (..), TxId, TxOut (..), TxOutAux (..),
+                     TxUndo, txpTxs, _txOutputs)
+import           Pos.Core (Address, Coin, EpochIndex, LocalSlotIndex, SlotCount,
                      SlotId (..), StakeholderId, Timestamp, addressF,
                      coinToInteger, decodeTextAddress, getEpochIndex,
                      getSlotIndex, mkCoin, sumCoins, timestampToPosix,
                      unsafeAddCoin, unsafeGetCoin, unsafeIntegerToCoin,
                      unsafeSubCoin)
-import           Pos.Core.Block (MainBlock, gbHeader, gbhConsensus, headerHash,
-                     mainBlockSlot, mainBlockTxPayload, mcdSlot, prevBlockL)
 import           Pos.Core.Merkle (getMerkleRoot, mkMerkleTree, mtRoot)
-import           Pos.Core.Txp (Tx (..), TxId, TxOut (..), TxOutAux (..), TxUndo,
-                     txpTxs, _txOutputs)
 import           Pos.Crypto (AbstractHash, Hash, HashAlgorithm, hash)
 import qualified Pos.DB.Lrc as LrcDB (getLeader)
 import qualified Pos.GState as GS
@@ -208,9 +209,10 @@ instance NFData CBlockEntry
 
 toBlockEntry
     :: ExplorerMode ctx m
-    => (MainBlock, Undo)
+    => SlotCount
+    -> (MainBlock, Undo)
     -> m CBlockEntry
-toBlockEntry (blk, Undo{..}) = do
+toBlockEntry epochSlots (blk, Undo{..}) = do
 
     blkSlotStart      <- getSlotStartCSLI $ blk ^. gbHeader . gbhConsensus . mcdSlot
 
@@ -220,7 +222,7 @@ toBlockEntry (blk, Undo{..}) = do
         slotIndex     = siSlot  blkHeaderSlot
 
     -- Find the epoch and slot leader
-    epochSlotLeader   <- LrcDB.getLeader $ SlotId epochIndex slotIndex
+    epochSlotLeader   <- LrcDB.getLeader epochSlots $ SlotId epochIndex slotIndex
 
     -- Fill required fields for @CBlockEntry@
     let cbeEpoch      = getEpochIndex epochIndex
@@ -275,10 +277,11 @@ data CBlockSummary = CBlockSummary
 
 toBlockSummary
     :: ExplorerMode ctx m
-    => (MainBlock, Undo)
+    => SlotCount
+    -> (MainBlock, Undo)
     -> m CBlockSummary
-toBlockSummary blund@(blk, _) = do
-    cbsEntry    <- toBlockEntry blund
+toBlockSummary epochSlots blund@(blk, _) = do
+    cbsEntry    <- toBlockEntry epochSlots blund
     cbsNextHash <- fmap toCHash <$> GS.resolveForwardLink blk
 
     let blockTxs      = blk ^. mainBlockTxPayload . txpTxs
@@ -458,4 +461,4 @@ instance Show CByteString where
 --------------------------------------------------------------------------------
 
 instance Arbitrary CAddress where
-    arbitrary = toCAddress . secretKeyToAddress <$> arbitrary
+    arbitrary = toCAddress <$> (secretKeyToAddress <$> arbitrary <*> arbitrary)

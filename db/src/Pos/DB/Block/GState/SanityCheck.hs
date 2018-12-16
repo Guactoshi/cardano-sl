@@ -6,13 +6,14 @@ module Pos.DB.Block.GState.SanityCheck
 
 import           Universum
 
-import           System.Wlog (WithLogger)
 import           UnliftIO (MonadUnliftIO)
 
+import           Pos.Chain.Genesis (GenesisData)
 import           Pos.DB.Class (MonadDBRead)
 import           Pos.DB.GState.Stakes (getRealTotalStake)
 import           Pos.DB.Txp (sanityCheckStakes, sanityCheckUtxo)
 import           Pos.Util.AssertMode (inAssertMode)
+import           Pos.Util.Wlog (WithLogger)
 
 sanityCheckDB ::
        ( MonadMask m
@@ -20,8 +21,8 @@ sanityCheckDB ::
        , MonadDBRead m
        , MonadUnliftIO m
        )
-    => m ()
-sanityCheckDB = inAssertMode sanityCheckGStateDB
+    => GenesisData -> m ()
+sanityCheckDB = inAssertMode . sanityCheckGStateDB
 
 -- | Check that GState DB is consistent.
 sanityCheckGStateDB ::
@@ -30,7 +31,8 @@ sanityCheckGStateDB ::
        , MonadUnliftIO m
        , WithLogger m
        )
-    => m ()
-sanityCheckGStateDB = do
+    => GenesisData
+    -> m ()
+sanityCheckGStateDB genesisData = do
     sanityCheckStakes
-    sanityCheckUtxo =<< getRealTotalStake
+    sanityCheckUtxo genesisData =<< getRealTotalStake

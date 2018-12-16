@@ -1,3 +1,5 @@
+{-# LANGUAGE RecordWildCards #-}
+
 -- | Pure Poll
 
 module Pos.DB.Update.Poll.Pure
@@ -12,16 +14,17 @@ import           Universum
 import           Control.Lens (at, mapped, to, uses, (%=), (.=))
 import qualified Data.HashMap.Strict as HM
 import qualified Data.HashSet as HS
-import           System.Wlog (CanLog, HasLoggerName (..), LogEvent,
-                     NamedPureLogger, logDebug, logWarning, runNamedPureLog)
 
 import           Pos.Chain.Update (BlockVersionState (..),
                      DecidedProposalState (..), MonadPoll (..),
-                     MonadPollRead (..), UndecidedProposalState (..), applyBVM,
-                     cpsSoftwareVersion, propStateToEither, psProposal)
-import           Pos.Core.Update (SoftwareVersion (..), UpdateProposal (..))
+                     MonadPollRead (..), SoftwareVersion (..),
+                     UndecidedProposalState (..), UpdateProposal (..),
+                     applyBVM, cpsSoftwareVersion, propStateToEither,
+                     psProposal)
 import           Pos.Crypto (hash)
 import qualified Pos.DB.Update.Poll.PollState as Poll
+import           Pos.Util.Wlog (CanLog, HasLoggerName (..), LogEvent,
+                     NamedPureLogger, logDebug, logWarning, runNamedPureLog)
 
 newtype PurePoll a = PurePoll
     { getPurePoll :: StateT Poll.PollState (NamedPureLogger Identity) a
@@ -66,9 +69,9 @@ instance MonadPollRead PurePoll where
             pure False
         filterFun (_, Just _) = pure True
     getConfirmedProposals = PurePoll $ use $ Poll.psConfirmedProposals . to HM.elems
-    getEpochTotalStake ei =
+    getEpochTotalStake _ ei =
         PurePoll $ uses Poll.psFullRichmenData $ (Just . fst) <=< HM.lookup ei
-    getRichmanStake ei si =
+    getRichmanStake _ ei si =
         PurePoll $ uses Poll.psFullRichmenData $ (HM.lookup si . snd) <=< HM.lookup ei
     getOldProposals si =
         PurePoll $ uses Poll.psActiveProposals $ filter ((<= si) . upsSlot) .

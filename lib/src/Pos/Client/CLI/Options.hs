@@ -1,5 +1,6 @@
-{-# LANGUAGE ApplicativeDo #-}
-{-# LANGUAGE CPP           #-}
+{-# LANGUAGE ApplicativeDo   #-}
+{-# LANGUAGE CPP             #-}
+{-# LANGUAGE RecordWildCards #-}
 
 -- | Module for command-line options and flags
 
@@ -37,6 +38,7 @@ import           Pos.Launcher.Configuration (ConfigurationOptions (..))
 data CommonArgs = CommonArgs
     { logConfig            :: !(Maybe FilePath)
     , logPrefix            :: !(Maybe FilePath)
+    , logConsoleOff        :: !Bool
     , reportServers        :: ![Text]
     , updateServers        :: ![Text]
     , configurationOptions :: !ConfigurationOptions
@@ -46,6 +48,7 @@ commonArgsParser :: Opt.Parser CommonArgs
 commonArgsParser = do
     logConfig <- optionalLogConfig
     logPrefix <- optionalLogPrefix
+    logConsoleOff <- optionalLogConsoleOff
     reportServers <- reportServersOption
     updateServers <- updateServersOption
     configurationOptions <- configurationOptionsParser
@@ -113,8 +116,14 @@ optionalLogConfig =
 
 optionalLogPrefix :: Opt.Parser (Maybe String)
 optionalLogPrefix =
-    optional $ Opt.strOption $
+    Opt.optional $ Opt.strOption $
         templateParser "logs-prefix" "FILEPATH" "Prefix to logger output path."
+
+optionalLogConsoleOff :: Opt.Parser Bool
+optionalLogConsoleOff =
+    Opt.switch $
+        Opt.long "log-console-off" <>
+        Opt.help "Inhibit logging to the console."
 
 optionalJSONPath :: Opt.Parser (Maybe FilePath)
 optionalJSONPath =
@@ -163,9 +172,9 @@ walletAddressOption na =
   where
     helpMsg = "IP and port for backend wallet API."
 
-docAddressOption :: Maybe NetworkAddress -> Opt.Parser NetworkAddress
+docAddressOption :: Maybe NetworkAddress -> Opt.Parser (Maybe NetworkAddress)
 docAddressOption na =
-    Opt.option (fromParsec addrParser) $
+    Opt.optional $ Opt.option (fromParsec addrParser) $
             Opt.long "wallet-doc-address"
          <> Opt.metavar "IP:PORT"
          <> Opt.help helpMsg

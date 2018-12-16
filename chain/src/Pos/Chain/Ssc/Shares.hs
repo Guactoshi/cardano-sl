@@ -1,4 +1,5 @@
-{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE RankNTypes      #-}
+{-# LANGUAGE RecordWildCards #-}
 
 -- | Logic of working with Shares.
 
@@ -11,16 +12,17 @@ import           Universum hiding (id)
 import           Crypto.Random (drgNewSeed, seedNew, withDRG)
 import qualified Data.HashMap.Strict as HM
 import           Formatting (build, sformat, (%))
-import           System.Wlog (WithLogger, launchNamedPureLog, logWarning)
 
 import           Pos.Binary.Class (AsBinary, asBinary, fromBinary)
+import           Pos.Chain.Ssc.Commitment (Commitment (..))
+import           Pos.Chain.Ssc.CommitmentsMap (getCommitmentsMap)
 import           Pos.Chain.Ssc.Mem (MonadSscMem, SscGlobalQuery,
                      sscRunGlobalQuery)
 import           Pos.Chain.Ssc.Types (sgsCommitments, sgsOpenings)
 import           Pos.Core.Common (StakeholderId, addressHash)
-import           Pos.Core.Ssc (Commitment (..), getCommitmentsMap)
 import           Pos.Crypto (DecShare, EncShare, VssKeyPair, VssPublicKey,
                      decryptShare, toVssPublicKey)
+import           Pos.Util.Wlog (WithLogger, launchNamedPureLog, logWarning)
 
 -- | Decrypt shares (in commitments) that are intended for us and that we can
 -- decrypt.

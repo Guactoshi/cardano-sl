@@ -1,3 +1,5 @@
+{-# LANGUAGE RecordWildCards #-}
+
 -- | Logic of local data processing in Update System.
 
 module Pos.DB.Update.Logic.Global
@@ -13,25 +15,24 @@ import           Universum
 
 import           Control.Monad.Except (MonadError, runExceptT)
 import           Data.Default (Default (def))
-import           System.Wlog (WithLogger, modifyLoggerName)
 import           UnliftIO (MonadUnliftIO)
 
-import           Pos.Chain.Update (BlockVersionState, ConfirmedProposalState,
-                     HasUpdateConfiguration, MonadPoll, PollModifier (..),
-                     PollT, PollVerFailure, ProposalState, USUndo, execPollT,
-                     execRollT, getAdoptedBV, lastKnownBlockVersion,
-                     reportUnexpectedError, runPollT)
-import           Pos.Core (HasCoreConfiguration, HasProtocolConstants,
-                     ProtocolMagic, StakeholderId, addressHash, epochIndexL)
-import           Pos.Core.Block (ComponentBlock (..), headerHashG,
+import           Pos.Chain.Block (ComponentBlock (..), headerHashG,
                      headerLeaderKeyL, headerSlotL)
+import           Pos.Chain.Genesis as Genesis (Config, configBlkSecurityParam)
+import           Pos.Chain.Update (ApplicationName, BlockVersion,
+                     BlockVersionData, BlockVersionState,
+                     ConfirmedProposalState, MonadPoll, NumSoftwareVersion,
+                     PollModifier (..), PollT, PollVerFailure, ProposalState,
+                     SoftwareVersion (..), USUndo, UpId, UpdateConfiguration,
+                     UpdatePayload, blockVersionL, execPollT, execRollT,
+                     getAdoptedBV, lastKnownBlockVersion,
+                     reportUnexpectedError, runPollT)
+import           Pos.Core (StakeholderId, addressHash, epochIndexL)
 import           Pos.Core.Chrono (NE, NewestFirst, OldestFirst)
 import           Pos.Core.Exception (reportFatalError)
 import           Pos.Core.Reporting (MonadReporting)
 import           Pos.Core.Slotting (MonadSlotsData, SlottingData, slottingVar)
-import           Pos.Core.Update (ApplicationName, BlockVersion,
-                     BlockVersionData, NumSoftwareVersion,
-                     SoftwareVersion (..), UpId, UpdatePayload, blockVersionL)
 import qualified Pos.DB.BatchOp as DB
 import qualified Pos.DB.Class as DB
 import           Pos.DB.Lrc (HasLrcContext)
@@ -44,6 +45,8 @@ import           Pos.DB.Update.Poll.Logic.Softfork (processGenesisBlock,
                      recordBlockIssuance)
 import           Pos.Util.AssertMode (inAssertMode)
 import qualified Pos.Util.Modifier as MM
+import           Pos.Util.Util (HasLens', lensOf)
+import           Pos.Util.Wlog (WithLogger, modifyLoggerName)
 
 
 ----------------------------------------------------------------------------
@@ -61,7 +64,7 @@ type USGlobalVerifyMode ctx m =
     , MonadIO m
     , MonadReader ctx m
     , HasLrcContext ctx
-    , HasUpdateConfiguration
+    , HasLens' ctx UpdateConfiguration
     )
 
 type USGlobalApplyMode ctx m =
@@ -77,7 +80,7 @@ type USGlobalApplyMode ctx m =
 ----------------------------------------------------------------------------
 
 withUSLogger :: WithLogger m => m a -> m a
-withUSLogger = modifyLoggerName (<> "us")
+withUSLogger = modifyLoggerName (<> ".us")
 
 -- | Apply chain of /definitely/ valid blocks to US part of GState DB
 -- and to US local data. This function assumes that no other thread
@@ -98,23 +101,22 @@ usApplyBlocks
     :: ( MonadThrow m
        , USGlobalApplyMode ctx m
        )
-    => ProtocolMagic
-    -> BlockVersion
+    => Genesis.Config
     -> OldestFirst NE UpdateBlock
     -> Maybe PollModifier
     -> m [DB.SomeBatchOp]
-usApplyBlocks pm bv blocks modifierMaybe =
+usApplyBlocks genesisConfig blocks modifierMaybe =
     withUSLogger $
     processModifier =<<
     case modifierMaybe of
         Nothing -> do
-            verdict <- usVerifyBlocks pm False bv blocks
+            verdict <- usVerifyBlocks genesisConfig False blocks
             either onFailure (return . fst) verdict
         Just modifier -> do
             -- TODO: I suppose such sanity checks should be done at higher
             -- level.
             inAssertMode $ do
-                verdict <- usVerifyBlocks pm False bv blocks
+                verdict <- usVerifyBlocks genesisConfig False blocks
                 whenLeft verdict $ \v -> onFailure v
             return modifier
   where
@@ -128,18 +130,16 @@ usApplyBlocks pm bv blocks modifierMaybe =
 usRollbackBlocks
     :: USGlobalApplyMode ctx m
     => NewestFirst NE (UpdateBlock, USUndo) -> m [DB.SomeBatchOp]
-usRollbackBlocks blunds =
+usRollbackBlocks blunds = do
+    uc <- view (lensOf @UpdateConfiguration)
     withUSLogger $
-    processModifier =<<
-    (runDBPoll . execPollT def $ mapM_ (rollbackUS . snd) blunds)
+        processModifier =<<
+        (runDBPoll uc . execPollT def $ mapM_ (rollbackUS . snd) blunds)
 
 -- This function takes a 'PollModifier' corresponding to a sequence of
 -- blocks, updates in-memory slotting data and converts this modifier
 -- to '[SomeBatchOp]'.
-processModifier ::
-       forall ctx m. (MonadSlotsData ctx m, HasCoreConfiguration)
-    => PollModifier
-    -> m [DB.SomeBatchOp]
+processModifier :: MonadSlotsData ctx m => PollModifier -> m [DB.SomeBatchOp]
 processModifier pm@PollModifier {pmSlottingData = newSlottingData} =
     modifierToBatch pm <$ whenJust newSlottingData setNewSlottingData
   where
@@ -164,20 +164,21 @@ usVerifyBlocks ::
        , MonadUnliftIO m
        , MonadReporting m
        )
-    => ProtocolMagic
+    => Genesis.Config
     -> Bool
-    -> BlockVersion
     -> OldestFirst NE UpdateBlock
     -> m (Either PollVerFailure (PollModifier, OldestFirst NE USUndo))
-usVerifyBlocks pm verifyAllIsKnown adoptedBV blocks =
+usVerifyBlocks genesisConfig verifyAllIsKnown blocks = do
+    uc <- view (lensOf @UpdateConfiguration)
     withUSLogger $
-    reportUnexpectedError $
-    processRes <$> run (runExceptT action)
+        reportUnexpectedError $
+        processRes <$> run uc (runExceptT action)
   where
     action = do
-        mapM (verifyBlock pm adoptedBV verifyAllIsKnown) blocks
-    run :: PollT (DBPoll n) a -> n (a, PollModifier)
-    run = runDBPoll . runPollT def
+        lastAdopted <- getAdoptedBV
+        mapM (verifyBlock genesisConfig lastAdopted verifyAllIsKnown) blocks
+    run :: UpdateConfiguration -> PollT (DBPoll n) a -> n (a, PollModifier)
+    run uc = runDBPoll uc . runPollT def
     processRes ::
            (Either PollVerFailure (OldestFirst NE USUndo), PollModifier)
         -> Either PollVerFailure (PollModifier, OldestFirst NE USUndo)
@@ -185,14 +186,18 @@ usVerifyBlocks pm verifyAllIsKnown adoptedBV blocks =
     processRes (Right undos, modifier) = Right (modifier, undos)
 
 verifyBlock
-    :: (USGlobalVerifyMode ctx m, MonadPoll m, MonadError PollVerFailure m, HasProtocolConstants)
-    => ProtocolMagic -> BlockVersion -> Bool -> UpdateBlock -> m USUndo
-verifyBlock _ _ _ (ComponentBlockGenesis genBlk) =
-    execRollT $ processGenesisBlock (genBlk ^. epochIndexL)
-verifyBlock pm lastAdopted verifyAllIsKnown (ComponentBlockMain header payload) =
+    :: (USGlobalVerifyMode ctx m, MonadPoll m, MonadError PollVerFailure m)
+    => Genesis.Config
+    -> BlockVersion
+    -> Bool
+    -> UpdateBlock
+    -> m USUndo
+verifyBlock genesisConfig _ _ (ComponentBlockGenesis genBlk) =
+    execRollT $ processGenesisBlock genesisConfig (genBlk ^. epochIndexL)
+verifyBlock genesisConfig lastAdopted verifyAllIsKnown (ComponentBlockMain header payload) =
     execRollT $ do
         verifyAndApplyUSPayload
-            pm
+            genesisConfig
             lastAdopted
             verifyAllIsKnown
             (Right header)
@@ -203,6 +208,7 @@ verifyBlock pm lastAdopted verifyAllIsKnown (ComponentBlockMain header payload) 
         -- we assume that block version is confirmed.
         let leaderPk = header ^. headerLeaderKeyL
         recordBlockIssuance
+            (configBlkSecurityParam genesisConfig)
             (addressHash leaderPk)
             (header ^. blockVersionL)
             (header ^. headerSlotL)
@@ -216,19 +222,20 @@ usCanCreateBlock ::
        , DB.MonadDBRead m
        , MonadReader ctx m
        , HasLrcContext ctx
-       , HasUpdateConfiguration
+       , HasLens' ctx UpdateConfiguration
        )
     => m Bool
-usCanCreateBlock =
-    withUSLogger $ runDBPoll $ do
+usCanCreateBlock = do
+    uc <- view (lensOf @UpdateConfiguration)
+    withUSLogger $ runDBPoll uc $ do
         lastAdopted <- getAdoptedBV
-        canCreateBlockBV lastAdopted lastKnownBlockVersion
+        canCreateBlockBV lastAdopted (lastKnownBlockVersion uc)
 
 ----------------------------------------------------------------------------
 -- Conversion to batch
 ----------------------------------------------------------------------------
 
-modifierToBatch :: HasCoreConfiguration => PollModifier -> [DB.SomeBatchOp]
+modifierToBatch :: PollModifier -> [DB.SomeBatchOp]
 modifierToBatch PollModifier {..} =
     concat $
     [ bvsModifierToBatch (MM.insertions pmBVs) (MM.deletions pmBVs)
@@ -247,8 +254,7 @@ modifierToBatch PollModifier {..} =
     ]
 
 bvsModifierToBatch
-    :: HasCoreConfiguration
-    => [(BlockVersion, BlockVersionState)]
+    :: [(BlockVersion, BlockVersionState)]
     -> [BlockVersion]
     -> [DB.SomeBatchOp]
 bvsModifierToBatch added deleted = addOps ++ delOps
@@ -256,13 +262,12 @@ bvsModifierToBatch added deleted = addOps ++ delOps
     addOps = map (DB.SomeBatchOp . uncurry SetBVState) added
     delOps = map (DB.SomeBatchOp . DelBV) deleted
 
-lastAdoptedModifierToBatch :: HasCoreConfiguration => Maybe (BlockVersion, BlockVersionData) -> [DB.SomeBatchOp]
+lastAdoptedModifierToBatch :: Maybe (BlockVersion, BlockVersionData) -> [DB.SomeBatchOp]
 lastAdoptedModifierToBatch Nothing          = []
 lastAdoptedModifierToBatch (Just (bv, bvd)) = [DB.SomeBatchOp $ SetAdopted bv bvd]
 
 confirmedVerModifierToBatch
-    :: HasCoreConfiguration
-    => [(ApplicationName, NumSoftwareVersion)]
+    :: [(ApplicationName, NumSoftwareVersion)]
     -> [ApplicationName]
     -> [DB.SomeBatchOp]
 confirmedVerModifierToBatch added deleted =
@@ -272,8 +277,7 @@ confirmedVerModifierToBatch added deleted =
     delOps = map (DB.SomeBatchOp . DelConfirmedVersion) deleted
 
 confirmedPropModifierToBatch
-    :: HasCoreConfiguration
-    => [(SoftwareVersion, ConfirmedProposalState)]
+    :: [(SoftwareVersion, ConfirmedProposalState)]
     -> [SoftwareVersion]
     -> [DB.SomeBatchOp]
 confirmedPropModifierToBatch (map snd -> confAdded) confDeleted =
@@ -283,8 +287,7 @@ confirmedPropModifierToBatch (map snd -> confAdded) confDeleted =
     confDelOps = map (DB.SomeBatchOp . DelConfirmedProposal) confDeleted
 
 upModifierToBatch
-    :: HasCoreConfiguration
-    => [(UpId, ProposalState)]
+    :: [(UpId, ProposalState)]
     -> [UpId]
     -> [DB.SomeBatchOp]
 upModifierToBatch (map snd -> added) deleted
@@ -293,10 +296,10 @@ upModifierToBatch (map snd -> added) deleted
     addOps = map (DB.SomeBatchOp . PutProposal) added
     delOps = map (DB.SomeBatchOp . DeleteProposal) deleted
 
-sdModifierToBatch :: HasCoreConfiguration => Maybe SlottingData -> [DB.SomeBatchOp]
+sdModifierToBatch :: Maybe SlottingData -> [DB.SomeBatchOp]
 sdModifierToBatch Nothing   = []
 sdModifierToBatch (Just sd) = [DB.SomeBatchOp $ PutSlottingData sd]
 
-epModifierToBatch :: HasCoreConfiguration => Maybe (HashSet StakeholderId) -> [DB.SomeBatchOp]
+epModifierToBatch :: Maybe (HashSet StakeholderId) -> [DB.SomeBatchOp]
 epModifierToBatch Nothing   = []
 epModifierToBatch (Just ep) = [DB.SomeBatchOp $ PutEpochProposers ep]

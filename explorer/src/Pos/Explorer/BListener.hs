@@ -26,18 +26,15 @@ import           Data.List ((\\))
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Map as M
 import qualified Ether
-import           System.Wlog (WithLogger)
 import           UnliftIO (MonadUnliftIO)
 
-import           Pos.Chain.Block (Blund)
-import           Pos.Chain.Txp (topsortTxs)
-import           Pos.Core (HasConfiguration, LocalSlotIndex (..), SlotId (..),
-                     difficultyL, epochIndexL, getChainDifficulty)
-import           Pos.Core.Block (Block, HeaderHash, MainBlock, headerHash,
-                     mainBlockSlot, mainBlockTxPayload)
+import           Pos.Chain.Block (Block, Blund, HeaderHash, MainBlock,
+                     headerHash, mainBlockSlot, mainBlockTxPayload)
+import           Pos.Chain.Txp (Tx, topsortTxs, txpTxs)
+import           Pos.Core (LocalSlotIndex (..), SlotId (..), difficultyL,
+                     epochIndexL, getChainDifficulty)
 import           Pos.Core.Chrono (NE, NewestFirst (..), OldestFirst (..),
                      toNewestFirst)
-import           Pos.Core.Txp (Tx, txpTxs)
 import           Pos.Crypto (withHash)
 import           Pos.DB.BatchOp (SomeBatchOp (..))
 import           Pos.DB.Block (MonadBListener (..))
@@ -46,6 +43,7 @@ import           Pos.Explorer.DB (Epoch, EpochPagedBlocksKey, Page,
                      defaultPageSize, findEpochMaxPages, numOfLastTxs)
 import qualified Pos.Explorer.DB as DB
 import           Pos.Util.AssertMode (inAssertMode)
+import           Pos.Util.Wlog (WithLogger)
 
 
 ----------------------------------------------------------------------------
@@ -67,7 +65,6 @@ type MonadBListenerT m =
     , MonadCatch m
     , MonadDBRead m
     , MonadUnliftIO m
-    , HasConfiguration
     )
 
 -- Explorer implementation for usual node. Combines the operations.
@@ -75,11 +72,10 @@ instance ( MonadDBRead m
          , MonadUnliftIO m
          , MonadCatch m
          , WithLogger m
-         , HasConfiguration
          )
          => MonadBListener (ExplorerBListener m) where
-    onApplyBlocks     blunds = onApplyCallGeneral blunds
-    onRollbackBlocks  blunds = onRollbackCallGeneral blunds
+    onApplyBlocks    _nm blunds     = onApplyCallGeneral blunds
+    onRollbackBlocks _nm _pc blunds = onRollbackCallGeneral blunds
 
 
 ----------------------------------------------------------------------------

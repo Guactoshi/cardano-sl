@@ -1,5 +1,5 @@
 name:                cardano-sl-infra
-version:             1.3.0
+version:             2.0.0
 synopsis:            Cardano SL - infrastructural
 description:         Cardano SL - infrastructural
 license:             MIT
@@ -74,6 +74,9 @@ library
                         Pos.Infra.Communication.Relay.Types
                         Pos.Infra.Communication.Relay.Util
 
+                        -- Fault injection
+                        Pos.Infra.InjectFail
+
                         -- Health Checks
                         Pos.Infra.HealthCheck.Route53
 
@@ -145,7 +148,6 @@ library
                       , iproute
                       , kademlia
                       , lens
-                      , log-warper >= 1.0.3
                       , mtl
                       , network-info
                       , network-transport
@@ -158,6 +160,7 @@ library
                       , tar
                       , time
                       , tagged
+                      , vector
                       , text
                       , time-units
                       , network-transport
@@ -184,7 +187,6 @@ library
                        DefaultSignatures
                        NoImplicitPrelude
                        OverloadedStrings
-                       RecordWildCards
                        TypeApplications
                        TupleSections
                        ViewPatterns
@@ -203,7 +205,7 @@ library
   build-tools: cpphs >= 1.19
   ghc-options: -pgmP cpphs -optP --cpp
 
-test-suite test
+test-suite infra-test
   main-is:          test.hs
   hs-source-dirs:   test
   default-language: Haskell2010
@@ -220,12 +222,13 @@ test-suite test
                     Test.Pos.Infra.Diffusion.Subscription.StatusSpec
                     Test.Pos.Infra.Diffusion.Subscription.SubscriptionSpec
                     Test.Pos.Infra.Gen
+                    Test.Pos.Infra.Json
 
   build-depends:    QuickCheck
                   , async
+                  , aeson
                   , base
                   , bytestring
-                  , cardano-sl-binary
                   , cardano-sl-binary-test
                   , cardano-sl-chain
                   , cardano-sl-chain-test
@@ -234,13 +237,17 @@ test-suite test
                   , cardano-sl-crypto
                   , cardano-sl-crypto-test
                   , cardano-sl-infra
+                  , cardano-sl-networking
                   , cardano-sl-util-test
                   , containers
+                  , dns
                   , generic-arbitrary
                   , hedgehog
                   , hspec
+                  , iproute
                   , kademlia
                   , universum
+                  , yaml
 
   ghc-options:         -Wall
                        -O2

@@ -3,6 +3,7 @@
 {-# LANGUAGE LambdaCase            #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE RankNTypes            #-}
+{-# LANGUAGE RecordWildCards       #-}
 {-# LANGUAGE TypeApplications      #-}
 
 module Main where
@@ -27,6 +28,7 @@ import           Node (ConversationActions (..), Listener (..), NodeAction (..),
                      simpleNodeEndPoint)
 import           Node.Message.Binary (binaryPacking)
 import           Pos.Util.Trace (Severity (..), Trace, wlogTrace)
+import           Pos.Util.Wlog (removeAllHandlers)
 import           ReceiverOptions (Args (..), argsParser)
 
 main :: IO ()
@@ -39,7 +41,7 @@ main = do
             argsParser
             empty
 
-    loadLogConfig logsPrefix logConfig
+    lh <- loadLogConfig logsPrefix logConfig
     setLocaleEncoding utf8
 
     transport <- do
@@ -53,6 +55,7 @@ main = do
     node logTrace (simpleNodeEndPoint transport) (const noReceiveDelay) (const noReceiveDelay) prng binaryPacking () defaultNodeEnvironment $ \_ ->
         NodeAction (const [pingListener noPong]) $ \_ -> do
             threadDelay (duration * 1000000)
+    removeAllHandlers lh
   where
 
     logTrace :: Trace IO (Severity, Text)

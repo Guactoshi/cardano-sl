@@ -11,12 +11,13 @@ import           Universum
 import           Control.Lens (makeLensesWith)
 import qualified Control.Monad.Reader as Mtl
 
+import           Pos.Chain.Update (UpdateConfiguration)
 import           Pos.Context (HasPrimaryKey (..), HasSscContext (..),
                      NodeContext)
-import           Pos.Core.Configuration (HasConfiguration)
 import           Pos.DB (NodeDBs)
 import           Pos.DB.Block (dbGetSerBlockRealDefault,
-                     dbGetSerUndoRealDefault, dbPutSerBlundsRealDefault)
+                     dbGetSerBlundRealDefault, dbGetSerUndoRealDefault,
+                     dbPutSerBlundsRealDefault)
 import           Pos.DB.Class (MonadDB (..), MonadDBRead (..))
 import           Pos.DB.Rocks (dbDeleteDefault, dbGetDefault,
                      dbIterSourceDefault, dbPutDefault, dbWriteBatchDefault)
@@ -25,9 +26,10 @@ import           Pos.Util.Lens (postfixLFields)
 import           Pos.Util.Util (HasLens (..))
 
 data WebModeContext ext = WebModeContext
-    { wmcNodeDBs      :: !NodeDBs
-    , wmcTxpLocalData :: !(GenericTxpLocalData ext)
-    , wmcNodeContext  :: !NodeContext
+    { wmcNodeDBs             :: !NodeDBs
+    , wmcTxpLocalData        :: !(GenericTxpLocalData ext)
+    , wmcNodeContext         :: !NodeContext
+    , wmcUpdateConfiguration :: !UpdateConfiguration
     }
 
 makeLensesWith postfixLFields ''WebModeContext
@@ -37,6 +39,9 @@ instance HasLens NodeDBs (WebModeContext ext) NodeDBs where
 
 instance HasLens TxpHolderTag (WebModeContext ext) (GenericTxpLocalData ext) where
     lensOf = wmcTxpLocalData_L
+
+instance HasLens UpdateConfiguration (WebModeContext ext) UpdateConfiguration where
+    lensOf = wmcUpdateConfiguration_L
 
 instance {-# OVERLAPPABLE #-}
     HasLens tag NodeContext r =>
@@ -52,13 +57,14 @@ instance HasPrimaryKey (WebModeContext ext) where
 
 type WebMode ext = Mtl.ReaderT (WebModeContext ext) IO
 
-instance HasConfiguration => MonadDBRead (WebMode ext) where
+instance MonadDBRead (WebMode ext) where
     dbGet = dbGetDefault
     dbIterSource = dbIterSourceDefault
     dbGetSerBlock = dbGetSerBlockRealDefault
     dbGetSerUndo = dbGetSerUndoRealDefault
+    dbGetSerBlund = dbGetSerBlundRealDefault
 
-instance HasConfiguration => MonadDB (WebMode ext) where
+instance MonadDB (WebMode ext) where
     dbPut = dbPutDefault
     dbWriteBatch = dbWriteBatchDefault
     dbDelete = dbDeleteDefault

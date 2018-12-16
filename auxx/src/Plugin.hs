@@ -1,5 +1,6 @@
-{-# LANGUAGE CPP        #-}
-{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE CPP             #-}
+{-# LANGUAGE RankNTypes      #-}
+{-# LANGUAGE RecordWildCards #-}
 
 -- | Auxx plugin.
 
@@ -19,13 +20,13 @@ import           Data.Constraint (Dict (..))
 import           Data.Time.Units (Second)
 import           Formatting (float, int, sformat, (%))
 import           System.IO (hFlush, stdout)
-import           System.Wlog (CanLog, HasLoggerName, logInfo)
 
-import           Pos.Chain.Txp (TxpConfiguration, genesisUtxo, unGenesisUtxo)
+import           Pos.Chain.Genesis as Genesis (Config (..))
+import           Pos.Chain.Txp (TxpConfiguration, genesisUtxo)
 import           Pos.Core.Conc (delay)
-import           Pos.Crypto (AHash (..), ProtocolMagic, fullPublicKeyF,
-                     hashHexF)
+import           Pos.Crypto (AHash (..), fullPublicKeyF, hashHexF)
 import           Pos.Infra.Diffusion.Types (Diffusion)
+import           Pos.Util.Wlog (CanLog, HasLoggerName, logInfo)
 
 import           AuxxOptions (AuxxOptions (..))
 import           Command (createCommandProcs)
@@ -41,16 +42,16 @@ import           Repl (PrintAction, WithCommandAction (..))
 
 auxxPlugin ::
        MonadAuxxMode m
-    => ProtocolMagic
+    => Genesis.Config
     -> TxpConfiguration
     -> AuxxOptions
     -> Either WithCommandAction Text
     -> Diffusion m
     -> m ()
-auxxPlugin pm txpConfig auxxOptions repl = \diffusion -> do
+auxxPlugin genesisConfig txpConfig auxxOptions repl = \diffusion -> do
     logInfo $ sformat ("Length of genesis utxo: " %int)
-                      (length $ unGenesisUtxo genesisUtxo)
-    rawExec (Just pm) (Just txpConfig) (Just Dict) auxxOptions (Just diffusion) repl
+                      (length $ genesisUtxo $ configGenesisData genesisConfig)
+    rawExec (Just genesisConfig) (Just txpConfig) (Just Dict) auxxOptions (Just diffusion) repl
 
 rawExec ::
        ( MonadIO m
@@ -58,32 +59,32 @@ rawExec ::
        , CanLog m
        , HasLoggerName m
        )
-    => Maybe ProtocolMagic
+    => Maybe Genesis.Config
     -> Maybe TxpConfiguration
     -> Maybe (Dict (MonadAuxxMode m))
     -> AuxxOptions
     -> Maybe (Diffusion m)
     -> Either WithCommandAction Text
     -> m ()
-rawExec pm txpConfig mHasAuxxMode AuxxOptions{..} mDiffusion = \case
+rawExec mCoreConfig txpConfig mHasAuxxMode AuxxOptions{..} mDiffusion = \case
     Left WithCommandAction{..} -> do
         printAction "... the auxx plugin is ready"
-        forever $ withCommand $ runCmd pm txpConfig mHasAuxxMode mDiffusion printAction
-    Right cmd -> runWalletCmd pm txpConfig mHasAuxxMode mDiffusion cmd
+        forever $ withCommand $ runCmd mCoreConfig txpConfig mHasAuxxMode mDiffusion printAction
+    Right cmd -> runWalletCmd mCoreConfig txpConfig mHasAuxxMode mDiffusion cmd
 
 runWalletCmd ::
        ( MonadIO m
        , CanLog m
        , HasLoggerName m
        )
-    => Maybe ProtocolMagic
+    => Maybe Genesis.Config
     -> Maybe TxpConfiguration
     -> Maybe (Dict (MonadAuxxMode m))
     -> Maybe (Diffusion m)
     -> Text
     -> m ()
-runWalletCmd pm txpConfig mHasAuxxMode mDiffusion line = do
-    runCmd pm txpConfig mHasAuxxMode mDiffusion printAction line
+runWalletCmd mCoreConfig txpConfig mHasAuxxMode mDiffusion line = do
+    runCmd mCoreConfig txpConfig mHasAuxxMode mDiffusion printAction line
     printAction "Command execution finished"
     printAction " " -- for exit by SIGPIPE
     liftIO $ hFlush stdout
@@ -99,15 +100,19 @@ runCmd ::
        , CanLog m
        , HasLoggerName m
        )
-    => Maybe ProtocolMagic
+    => Maybe Genesis.Config
     -> Maybe TxpConfiguration
     -> Maybe (Dict (MonadAuxxMode m))
     -> Maybe (Diffusion m)
     -> PrintAction m
     -> Text
     -> m ()
-runCmd pm txpConfig mHasAuxxMode mDiffusion printAction line = do
-    let commandProcs = createCommandProcs pm txpConfig mHasAuxxMode printAction mDiffusion
+runCmd mCoreConfig txpConfig mHasAuxxMode mDiffusion printAction line = do
+    let commandProcs = createCommandProcs mCoreConfig
+                                          txpConfig
+                                          mHasAuxxMode
+                                          printAction
+                                          mDiffusion
         parse = withExceptT Lang.ppParseError . ExceptT . return . Lang.parse
         resolveCommandProcs =
             withExceptT Lang.ppResolveErrors . ExceptT . return .

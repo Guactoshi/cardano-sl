@@ -10,8 +10,6 @@ import           Test.Hspec (Spec, describe)
 import           Test.Hspec.QuickCheck (modifyMaxSuccess)
 
 import qualified Pos.Chain.Block as Block
-import           Pos.Core.Configuration (defaultCoreConfiguration,
-                     withGenesisSpec)
 import qualified Pos.Network.Block.Types as Block
 
 import           Test.Pos.Binary.Helpers (binaryTest)
@@ -20,8 +18,7 @@ import           Test.Pos.Core.Arbitrary ()
 import           Test.Pos.DB.Block.Arbitrary ()
 
 spec :: Spec
-spec =
-    withGenesisSpec 0 defaultCoreConfiguration id $ \_ -> do
+spec = do
         describe "Block network types" $ modifyMaxSuccess (min 10) $ do
             binaryTest @Block.MsgGetHeaders
             binaryTest @Block.MsgGetBlocks

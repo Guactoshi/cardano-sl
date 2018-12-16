@@ -18,21 +18,21 @@ import           Universum
 
 import           Control.Lens (makeLensesWith)
 import qualified Control.Monad.Reader as Mtl
-import           System.Wlog (HasLoggerName (..), LoggerName)
 
 import           Pos.Chain.Block (HasSlogContext (..), HasSlogGState (..))
 import           Pos.Chain.Delegation (DelegationVar)
 import           Pos.Chain.Ssc (SscMemTag, SscState)
+import           Pos.Chain.Update (UpdateConfiguration)
 import           Pos.Context (HasNodeContext (..), HasPrimaryKey (..),
                      HasSscContext (..), NodeContext)
-import           Pos.Core (HasConfiguration)
 import           Pos.Core.JsonLog (CanJsonLog (..))
 import           Pos.Core.Reporting (HasMisbehaviorMetrics (..))
 import           Pos.Core.Slotting (HasSlottingVar (..), MonadSlotsData)
 import           Pos.DB (MonadGState (..), NodeDBs)
 import           Pos.DB.Block (MonadBListener (..), dbGetSerBlockRealDefault,
-                     dbGetSerUndoRealDefault, dbPutSerBlundsRealDefault,
-                     onApplyBlocksStub, onRollbackBlocksStub)
+                     dbGetSerBlundRealDefault, dbGetSerUndoRealDefault,
+                     dbPutSerBlundsRealDefault, onApplyBlocksStub,
+                     onRollbackBlocksStub)
 import           Pos.DB.Class (MonadDB (..), MonadDBRead (..))
 import           Pos.DB.DB (gsAdoptedBVDataDefault)
 import           Pos.DB.Rocks (dbDeleteDefault, dbGetDefault,
@@ -55,21 +55,23 @@ import           Pos.Util.LoggerName (HasLoggerName' (..), askLoggerNameDefault,
                      modifyLoggerNameDefault)
 import           Pos.Util.UserSecret (HasUserSecret (..))
 import           Pos.Util.Util (HasLens (..))
+import           Pos.Util.Wlog (HasLoggerName (..), LoggerName)
 import           Pos.WorkMode.Class (MinWorkMode, WorkMode)
 
 data RealModeContext ext = RealModeContext
-    { rmcNodeDBs       :: !NodeDBs
-    , rmcSscState      :: !SscState
-    , rmcTxpLocalData  :: !(GenericTxpLocalData ext)
-    , rmcDelegationVar :: !DelegationVar
-    , rmcJsonLogConfig :: !JsonLogConfig
-    , rmcLoggerName    :: !LoggerName
-    , rmcNodeContext   :: !NodeContext
-    , rmcReporter      :: !(Reporter IO)
+    { rmcNodeDBs             :: !NodeDBs
+    , rmcSscState            :: !SscState
+    , rmcTxpLocalData        :: !(GenericTxpLocalData ext)
+    , rmcDelegationVar       :: !DelegationVar
+    , rmcJsonLogConfig       :: !JsonLogConfig
+    , rmcLoggerName          :: !LoggerName
+    , rmcNodeContext         :: !NodeContext
+    , rmcReporter            :: !(Reporter IO)
       -- ^ How to do reporting. It's in here so that we can have
       -- 'MonadReporting (RealMode ext)' in the mean-time, until we
       -- re-architecht the reporting system so that it's not built-in to the
       -- application's monad.
+    , rmcUpdateConfiguration :: !UpdateConfiguration
     }
 
 type EmptyMempoolExt = ()
@@ -80,6 +82,9 @@ makeLensesWith postfixLFields ''RealModeContext
 
 instance HasLens NodeDBs (RealModeContext ext) NodeDBs where
     lensOf = rmcNodeDBs_L
+
+instance HasLens UpdateConfiguration (RealModeContext ext) UpdateConfiguration where
+    lensOf = rmcUpdateConfiguration_L
 
 instance HasLens NodeContext (RealModeContext ext) NodeContext where
     lensOf = rmcNodeContext_L
@@ -143,24 +148,23 @@ instance {-# OVERLAPPING #-} HasLoggerName (RealMode ext) where
 instance {-# OVERLAPPING #-} CanJsonLog (RealMode ext) where
     jsonLog = jsonLogDefault
 
-instance (HasConfiguration, MonadSlotsData ctx (RealMode ext))
-      => MonadSlots ctx (RealMode ext)
-  where
+instance MonadSlotsData ctx (RealMode ext) => MonadSlots ctx (RealMode ext) where
     getCurrentSlot = getCurrentSlotSimple
     getCurrentSlotBlocking = getCurrentSlotBlockingSimple
     getCurrentSlotInaccurate = getCurrentSlotInaccurateSimple
     currentTimeSlotting = currentTimeSlottingSimple
 
-instance HasConfiguration => MonadGState (RealMode ext) where
+instance MonadGState (RealMode ext) where
     gsAdoptedBVData = gsAdoptedBVDataDefault
 
-instance HasConfiguration => MonadDBRead (RealMode ext) where
-    dbGet = dbGetDefault
-    dbIterSource = dbIterSourceDefault
+instance MonadDBRead (RealMode ext) where
+    dbGet         = dbGetDefault
+    dbIterSource  = dbIterSourceDefault
     dbGetSerBlock = dbGetSerBlockRealDefault
-    dbGetSerUndo = dbGetSerUndoRealDefault
+    dbGetSerUndo  = dbGetSerUndoRealDefault
+    dbGetSerBlund  = dbGetSerBlundRealDefault
 
-instance HasConfiguration => MonadDB (RealMode ext) where
+instance MonadDB (RealMode ext) where
     dbPut = dbPutDefault
     dbWriteBatch = dbWriteBatchDefault
     dbDelete = dbDeleteDefault
@@ -168,12 +172,11 @@ instance HasConfiguration => MonadDB (RealMode ext) where
 
 instance MonadBListener (RealMode ext) where
     onApplyBlocks = onApplyBlocksStub
-    onRollbackBlocks = onRollbackBlocksStub
+    onRollbackBlocks nm _ blunds = onRollbackBlocksStub nm blunds
 
 type instance MempoolExt (RealMode ext) = ext
 
-instance (HasConfiguration) =>
-         MonadTxpLocal (RealMode ()) where
+instance MonadTxpLocal (RealMode ()) where
     txpNormalize = txNormalize
     txpProcessTx = txProcessTransaction
 

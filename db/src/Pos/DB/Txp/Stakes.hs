@@ -31,20 +31,20 @@ import qualified Database.RocksDB as Rocks
 import           Formatting (bprint, sformat, (%))
 import qualified Formatting.Buildable
 import           Serokell.Util (Color (Red), colorize)
-import           System.Wlog (WithLogger, logError)
 import           UnliftIO (MonadUnliftIO)
 
-import           Pos.Chain.Txp (GenesisUtxo (..), utxoToStakes)
-import           Pos.Core (Coin, HasCoreConfiguration, StakeholderId, StakesMap,
-                     coinF, mkCoin, sumCoins, unsafeAddCoin,
-                     unsafeIntegerToCoin)
+import           Pos.Binary.Class (serialize')
+import           Pos.Chain.Genesis (GenesisData (..))
+import           Pos.Chain.Txp (genesisStakes)
+import           Pos.Core (Coin, StakeholderId, StakesMap, coinF, mkCoin,
+                     sumCoins, unsafeAddCoin, unsafeIntegerToCoin)
 import           Pos.Crypto (shortHashF)
 import           Pos.DB (DBError (..), DBTag (GStateDB), IterType, MonadDB,
-                     MonadDBRead, RocksBatchOp (..), dbIterSource,
-                     dbSerializeValue)
+                     MonadDBRead, RocksBatchOp (..), dbIterSource)
 import           Pos.DB.GState.Common (gsPutBi)
 import           Pos.DB.GState.Stakes (StakeIter, ftsStakeKey, ftsSumKey,
                      getRealTotalStake)
+import           Pos.Util.Wlog (WithLogger, logError)
 
 ----------------------------------------------------------------------------
 -- Operations
@@ -60,28 +60,28 @@ instance Buildable StakesOp where
     build (PutFtsStake ad c) =
         bprint ("PutFtsStake ("%shortHashF%", "%coinF%")") ad c
 
-instance HasCoreConfiguration => RocksBatchOp StakesOp where
-    toBatchOp (PutTotalStake c)  = [Rocks.Put ftsSumKey (dbSerializeValue c)]
+instance RocksBatchOp StakesOp where
+    toBatchOp (PutTotalStake c)  = [Rocks.Put ftsSumKey (serialize' c)]
     toBatchOp (PutFtsStake ad c) =
         if c == mkCoin 0 then [Rocks.Del (ftsStakeKey ad)]
-        else [Rocks.Put (ftsStakeKey ad) (dbSerializeValue c)]
+        else [Rocks.Put (ftsStakeKey ad) (serialize' c)]
 
 ----------------------------------------------------------------------------
 -- Initialization
 ----------------------------------------------------------------------------
 
-initGStateStakes :: MonadDB m => GenesisUtxo -> m ()
-initGStateStakes (GenesisUtxo genesisUtxo) = do
+initGStateStakes :: MonadDB m => GenesisData -> m ()
+initGStateStakes genesisData = do
     putFtsStakes
     putGenesisTotalStake
   where
     putTotalFtsStake = gsPutBi ftsSumKey
-    genesisStakes = utxoToStakes genesisUtxo
-    totalCoins = sumCoins genesisStakes
+    stakes = genesisStakes genesisData
+    totalCoins = sumCoins stakes
     -- Will 'error' if the result doesn't fit into 'Coin' (which should never
     -- happen)
     putGenesisTotalStake = putTotalFtsStake (unsafeIntegerToCoin totalCoins)
-    putFtsStakes = mapM_ (uncurry putFtsStake) . HM.toList $ genesisStakes
+    putFtsStakes = mapM_ (uncurry putFtsStake) $ HM.toList stakes
 
 ----------------------------------------------------------------------------
 -- Iteration

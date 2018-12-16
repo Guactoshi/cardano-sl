@@ -1,4 +1,5 @@
-{-# LANGUAGE Rank2Types #-}
+{-# LANGUAGE Rank2Types      #-}
+{-# LANGUAGE RecordWildCards #-}
 
 -- | Base operations in Poll.
 
@@ -10,6 +11,7 @@ module Pos.DB.Update.Poll.Logic.Base
        , mkTotNegative
        , mkTotSum
 
+       , BVChange (..)
        , adoptBlockVersion
        , canBeAdoptedBV
        , canBeProposedBV
@@ -36,29 +38,27 @@ import qualified Data.Set as S
 import           Data.Tagged (Tagged, untag)
 import           Data.Time.Units (convertUnit)
 import           Formatting (build, int, sformat, (%))
-import           System.Wlog (WithLogger, logDebug, logNotice)
 
-import           Pos.Chain.Update (BlockVersionState (..),
+import           Pos.Chain.Block (HeaderHash, IsMainHeader (..), headerHashG)
+import           Pos.Chain.Update (BlockVersion (..), BlockVersionData (..),
+                     BlockVersionModifier (..), BlockVersionState (..),
                      ConfirmedProposalState (..), DecidedProposalState (..),
                      DpsExtra (..), MonadPoll (..), MonadPollRead (..),
                      PollVerFailure (..), ProposalState (..),
-                     UndecidedProposalState (..), UpsExtra (..),
+                     SoftforkRule (..), UndecidedProposalState (..), UpId,
+                     UpdateProposal (..), UpdateVote (..), UpsExtra (..),
                      bvsIsConfirmed, combineVotes, cpsBlockVersion,
                      isPositiveVote, newVoteState)
-import           Pos.Core (Coin, CoinPortion (..), EpochIndex,
-                     HasProtocolConstants, SlotId, TimeDiff (..), addressHash,
-                     applyCoinPortionUp, coinPortionDenominator, coinToInteger,
-                     difficultyL, epochSlots, getCoinPortion, isBootstrapEra,
-                     sumCoins, unsafeAddCoin, unsafeIntegerToCoin,
-                     unsafeSubCoin)
-import           Pos.Core.Block (HeaderHash, IsMainHeader (..), headerHashG)
+import           Pos.Core (Coin, CoinPortion (..), EpochIndex, SlotCount,
+                     SlotId, TimeDiff (..), addressHash, applyCoinPortionUp,
+                     coinPortionDenominator, coinToInteger, difficultyL,
+                     getCoinPortion, sumCoins, unsafeAddCoin,
+                     unsafeIntegerToCoin, unsafeSubCoin)
 import           Pos.Core.Slotting (EpochSlottingData (..), SlottingData,
                      addEpochSlottingData, getCurrentEpochIndex,
                      getNextEpochSlottingData)
-import           Pos.Core.Update (BlockVersion (..), BlockVersionData (..),
-                     BlockVersionModifier (..), SoftforkRule (..), UpId,
-                     UpdateProposal (..), UpdateVote (..))
 import           Pos.Crypto (PublicKey, hash, shortHashF)
+import           Pos.Util.Wlog (WithLogger, logDebug, logNotice)
 
 
 
@@ -90,6 +90,11 @@ canCreateBlockBV lastAdopted bv = do
     pure (bv == lastAdopted || isCompeting)
 
 
+-- | @BVChange@ encodes the validity of a BlockVersion update
+data BVChange = BVIncrement
+              | BVNoChange
+              | BVInvalid
+
 -- | Check whether given 'BlockVersion' can be proposed according to
 -- current Poll.
 --
@@ -113,12 +118,12 @@ canCreateBlockBV lastAdopted bv = do
 -- (let's call this set 'X').
 -- If 'X' is empty, given alternative version must be 0.
 -- Otherwise it must be in 'X' or greater than maximum from 'X' by one.
-canBeProposedBV :: MonadPollRead m => BlockVersion -> m Bool
+canBeProposedBV :: MonadPollRead m => BlockVersion -> m BVChange
 canBeProposedBV bv =
     canBeProposedPure bv <$> getAdoptedBV <*>
     (S.fromList <$> getProposedBVs)
 
-canBeProposedPure :: BlockVersion -> BlockVersion -> Set BlockVersion -> Bool
+canBeProposedPure :: BlockVersion -> BlockVersion -> Set BlockVersion -> BVChange
 canBeProposedPure BlockVersion { bvMajor = givenMajor
                                , bvMinor = givenMinor
                                , bvAlt = givenAlt
@@ -126,19 +131,26 @@ canBeProposedPure BlockVersion { bvMajor = givenMajor
                                               , bvMinor = adoptedMinor
                                               , bvAlt = adoptedAlt
                                               } proposed
-    | givenMajor < adoptedMajor = False
-    | givenMajor > adoptedMajor + 1 = False
-    | givenMajor == adoptedMajor + 1 && givenMinor /= 0 = False
+    | givenMajor < adoptedMajor = BVInvalid
+    | givenMajor > adoptedMajor + 1 = BVInvalid
+    | givenMajor == adoptedMajor + 1 && givenMinor /= 0 = BVInvalid
     | givenMajor == adoptedMajor &&
-          givenMinor /= adoptedMinor && givenMinor /= adoptedMinor + 1 = False
+          givenMinor /= adoptedMinor && givenMinor /= adoptedMinor + 1 = BVInvalid
     | (givenMajor, givenMinor) == (adoptedMajor, adoptedMinor) =
-        givenAlt == adoptedAlt
+        if givenAlt == adoptedAlt
+           then BVNoChange
+           else BVInvalid
     -- At this point we know that
     -- '(givenMajor, givenMinor) > (adoptedMajor, adoptedMinor)'
-    | null relevantProposed = givenAlt == 0
+    | null relevantProposed =
+        if givenAlt == 0
+           then BVIncrement
+           else BVInvalid
     | otherwise =
-        givenAlt == (S.findMax relevantProposed + 1) ||
-        givenAlt `S.member` relevantProposed
+        if (givenAlt == (S.findMax relevantProposed + 1) ||
+            givenAlt `S.member` relevantProposed)
+           then BVIncrement
+           else BVInvalid
   where
     -- Here we can use mapMonotonic, even though 'bvAlt' itself is not
     -- necessary monotonic.
@@ -197,10 +209,11 @@ adoptBlockVersion winningBlk bv = do
 -- @SlottingData@ from the update. We can recieve updated epoch @SlottingData@
 -- and from it, changed epoch/slot times, which is important to keep track of.
 updateSlottingData
-    :: (HasProtocolConstants, MonadError PollVerFailure m, MonadPoll m)
-    => EpochIndex
+    :: (MonadError PollVerFailure m, MonadPoll m)
+    => SlotCount
+    -> EpochIndex
     -> m ()
-updateSlottingData epochIndex = do
+updateSlottingData epochSlots epochIndex = do
     let errFmt =
             ("can't update slotting data, stored current epoch is "%int%
              ", while given epoch is "%int%
@@ -246,14 +259,12 @@ verifyNextBVMod
     -> BlockVersionData
     -> BlockVersionModifier
     -> m ()
-verifyNextBVMod upId epoch
+verifyNextBVMod upId _epoch
   BlockVersionData { bvdScriptVersion = oldSV
                    , bvdMaxBlockSize = oldMBS
-                   , bvdUnlockStakeEpoch = oldUnlockStakeEpoch
                    }
   BlockVersionModifier { bvmScriptVersion = newSVM
                        , bvmMaxBlockSize = newMBSM
-                       , bvmUnlockStakeEpoch = newUnlockStakeEpochM
                        }
     | Just newSV <- newSVM,
       newSV /= oldSV + 1 && newSV /= oldSV =
@@ -263,15 +274,6 @@ verifyNextBVMod upId epoch
       newMBS > oldMBS * 2 =
         throwError
            $ PollLargeMaxBlockSize (oldMBS * 2) newMBS upId
-    | Just newUnlockStakeEpoch <- newUnlockStakeEpochM,
-      oldUnlockStakeEpoch /= newUnlockStakeEpoch = do
-          let bootstrap = isBootstrapEra oldUnlockStakeEpoch epoch
-          unless bootstrap $ throwError
-              $ PollBootstrapEraInvalidChange
-                    epoch
-                    oldUnlockStakeEpoch
-                    newUnlockStakeEpoch
-                    upId
     | otherwise = pass
 
 -- | Dummy type for tagging used by 'calcSoftforkThreshold'.

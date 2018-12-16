@@ -1,3 +1,5 @@
+{-# LANGUAGE RecordWildCards #-}
+
 -- | Functions operating on UTXO (in 'UtxoM' monad).
 
 module Pos.Chain.Txp.Toil.Utxo.Functions
@@ -10,7 +12,6 @@ module Pos.Chain.Txp.Toil.Utxo.Functions
 
 import           Universum
 
-import           Control.Lens (_Left)
 import           Control.Monad.Except (throwError)
 import qualified Data.List.NonEmpty as NE
 import           Data.Set (Set)
@@ -18,21 +19,24 @@ import qualified Data.Set as Set
 import           Formatting (int, sformat, (%))
 import           Serokell.Util (allDistinct, enumerate)
 
-import           Pos.Chain.Script (Script (..), isKnownScriptVersion,
-                     txScriptCheck)
+import           Pos.Chain.Script (Script (..))
 import           Pos.Chain.Txp.Toil.Failure (ToilVerFailure (..),
                      TxOutVerFailure (..), WitnessVerFailure (..))
 import           Pos.Chain.Txp.Toil.Monad (UtxoM, utxoDel, utxoGet, utxoPut)
 import           Pos.Chain.Txp.Toil.Types (TxFee (..))
+import           Pos.Chain.Txp.Tx (Tx (..), TxAttributes, TxIn (..), TxOut (..),
+                     isTxInUnknown)
+import           Pos.Chain.Txp.TxAux (TxAux (..))
+import           Pos.Chain.Txp.TxOutAux (TxOutAux (..))
+import           Pos.Chain.Txp.TxWitness (TxInWitness (..), TxSigData (..),
+                     TxWitness)
+import           Pos.Chain.Txp.Undo (TxUndo)
 import           Pos.Core (AddrType (..), Address (..), integerToCoin,
                      isRedeemAddress, isUnknownAddressType, sumCoins)
-import           Pos.Core.Attributes (Attributes (attrRemain),
-                     areAttributesKnown)
-import           Pos.Core.Common (checkPubKeyAddress, checkRedeemAddress,
-                     checkScriptAddress)
-import           Pos.Core.Txp (Tx (..), TxAttributes, TxAux (..), TxIn (..),
-                     TxInWitness (..), TxOut (..), TxOutAux (..),
-                     TxSigData (..), TxUndo, TxWitness, isTxInUnknown)
+import           Pos.Core.Attributes (Attributes (..), areAttributesKnown)
+import           Pos.Core.Common (AddrAttributes (..), checkPubKeyAddress,
+                     checkRedeemAddress)
+import           Pos.Core.NetworkMagic (NetworkMagic)
 import           Pos.Crypto (SignTag (SignRedeemTx, SignTx), WithHash (..),
                      checkSig, hash, redeemCheckSig)
 import           Pos.Crypto.Configuration (ProtocolMagic)
@@ -53,6 +57,7 @@ data VTxContext = VTxContext
       vtcVerifyAllIsKnown :: !Bool
 --    , vtcSlotId   :: !SlotId         -- ^ Slot id of block transaction is checked in
 --    , vtcLeaderId :: !StakeholderId  -- ^ Leader id of block transaction is checked in
+    , vtcNetworkMagic     :: !NetworkMagic
     }
 
 -- | Result of successful 'Tx' verification based on Utxo.
@@ -189,6 +194,11 @@ verifyOutputs VTxContext {..} (TxAux UnsafeTx {..} _) =
             throwError $ ToilInvalidOutput i (TxOutUnknownAddressType addr)
         when (isRedeemAddress addr) $
             throwError $ ToilInvalidOutput i (TxOutRedeemAddressProhibited addr)
+        unless (addressHasValidMagic (attrData addrAttributes)) $
+            throwError $ ToilInvalidOutput i (TxOutAddressBadNetworkMagic addr)
+
+    addressHasValidMagic :: AddrAttributes -> Bool
+    addressHasValidMagic addrAttrs = vtcNetworkMagic == (aaNetworkMagic addrAttrs)
 
 -- Verify inputs of a transaction after they have been resolved
 -- (implies that they are known).
@@ -224,7 +234,9 @@ verifyKnownInputs protocolMagic VTxContext {..} resolvedInputs TxAux {..} = do
 
     checkSpendingData addr wit = case wit of
         PkWitness twKey _            -> checkPubKeyAddress twKey addr
-        ScriptWitness twValidator _  -> checkScriptAddress twValidator addr
+        -- The existing blockchain should not have any output addresses of this
+        -- witness type, so checking should just fail.
+        ScriptWitness _ _            -> False
         RedeemWitness twRedeemKey _  -> checkRedeemAddress twRedeemKey addr
         UnknownWitnessType witTag _  -> case addrType addr of
             ATUnknown addrTag -> addrTag == witTag
@@ -240,14 +252,9 @@ verifyKnownInputs protocolMagic VTxContext {..} resolvedInputs TxAux {..} = do
             unless (redeemCheckSig protocolMagic SignRedeemTx twRedeemKey txSigData twRedeemSig) $
                 throwError WitnessWrongSignature
         ScriptWitness twValidator twRedeemer -> do
-            let valVer = scrVersion twValidator
-                redVer = scrVersion twRedeemer
-            when (valVer /= redVer) $
-                throwError $ WitnessScriptVerMismatch valVer redVer
-            when (vtcVerifyAllIsKnown && not (isKnownScriptVersion valVer)) $
-                throwError $ WitnessUnknownScriptVer valVer
-            over _Left WitnessScriptError $
-                txScriptCheck txSigData twValidator twRedeemer
+            -- The existing blockchain should not have any witnesses of this
+            -- type, so checking should just fail using the following.
+            Left $ WitnessScriptVerMismatch (scrVersion twValidator) (scrVersion twRedeemer)
         UnknownWitnessType t _ ->
             when vtcVerifyAllIsKnown $
                 throwError $ WitnessUnknownType t

@@ -22,10 +22,10 @@ import qualified Control.Monad.Reader as Mtl
 import           Servant.Server (Handler, hoistServer)
 
 import           Pos.Chain.Block (HasBlockConfiguration)
+import           Pos.Chain.Genesis as Genesis (Config (..))
 import           Pos.Chain.Ssc (HasSscConfiguration)
 import           Pos.Chain.Update (HasUpdateConfiguration)
 import           Pos.Configuration (HasNodeConfiguration)
-import           Pos.Core (HasConfiguration)
 import           Pos.DB.Txp (MempoolExt, MonadTxpLocal (..))
 import           Pos.Infra.Diffusion.Types (Diffusion)
 import           Pos.Infra.Reporting (MonadReporting (..))
@@ -53,15 +53,13 @@ type ExplorerProd = ExtraContextT (ExplorerBListener RealModeE)
 
 type instance MempoolExt ExplorerProd = ExplorerExtraModifier
 
-instance HasConfiguration =>
-         MonadTxpLocal RealModeE where
+instance MonadTxpLocal RealModeE where
     txpNormalize = eTxNormalize
     txpProcessTx = eTxProcessTransaction
 
-instance HasConfiguration =>
-         MonadTxpLocal ExplorerProd where
+instance MonadTxpLocal ExplorerProd where
     txpNormalize pm = lift . lift . txpNormalize pm
-    txpProcessTx pm txpConfig = lift . lift . txpProcessTx pm txpConfig
+    txpProcessTx genesisConfig txpConfig = lift . lift . txpProcessTx genesisConfig txpConfig
 
 -- | Use the 'RealMode' instance.
 -- FIXME instance on a type synonym.
@@ -75,8 +73,7 @@ liftToExplorerProd :: RealModeE a -> ExplorerProd a
 liftToExplorerProd = lift . lift
 
 type HasExplorerConfiguration =
-    ( HasConfiguration
-    , HasBlockConfiguration
+    ( HasBlockConfiguration
     , HasNodeConfiguration
     , HasUpdateConfiguration
     , HasSscConfiguration
@@ -85,37 +82,43 @@ type HasExplorerConfiguration =
 
 notifierPlugin
     :: HasExplorerConfiguration
-    => NotifierSettings
+    => Genesis.Config
+    -> NotifierSettings
     -> Diffusion ExplorerProd
     -> ExplorerProd ()
-notifierPlugin settings _ = notifierApp settings
+notifierPlugin genesisConfig settings _ = notifierApp genesisConfig settings
 
 explorerPlugin
     :: HasExplorerConfiguration
-    => Word16
+    => Genesis.Config
+    -> Word16
     -> Diffusion ExplorerProd
     -> ExplorerProd ()
-explorerPlugin = flip explorerServeWebReal
+explorerPlugin genesisConfig = flip $ explorerServeWebReal genesisConfig
 
 explorerServeWebReal
     :: HasExplorerConfiguration
-    => Diffusion ExplorerProd
+    => Genesis.Config
+    -> Diffusion ExplorerProd
     -> Word16
     -> ExplorerProd ()
-explorerServeWebReal diffusion port = do
+explorerServeWebReal genesisConfig diffusion port = do
     rctx <- ask
-    let handlers = explorerHandlers diffusion
-        server = hoistServer explorerApi (convertHandler rctx) handlers
+    let handlers = explorerHandlers genesisConfig diffusion
+        server   = hoistServer
+            explorerApi
+            (convertHandler genesisConfig rctx)
+            handlers
         app = explorerApp (pure server)
     explorerServeImpl app port
 
 convertHandler
-    :: HasConfiguration
-    => RealModeContext ExplorerExtraModifier
+    :: Genesis.Config
+    -> RealModeContext ExplorerExtraModifier
     -> ExplorerProd a
     -> Handler a
-convertHandler rctx handler =
-    let extraCtx = makeExtraCtx
+convertHandler genesisConfig rctx handler =
+    let extraCtx = makeExtraCtx genesisConfig
         ioAction = realRunner $
                    runExplorerProd extraCtx
                    handler

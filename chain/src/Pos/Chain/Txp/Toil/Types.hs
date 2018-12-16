@@ -10,8 +10,6 @@ module Pos.Chain.Txp.Toil.Types
        , utxoF
        , utxoToModifier
        , utxoToLookup
-       , GenesisUtxo (..)
-       , _GenesisUtxo
 
        , StakesView (..)
        , svStakes
@@ -29,7 +27,7 @@ module Pos.Chain.Txp.Toil.Types
 
 import           Universum
 
-import           Control.Lens (makeLenses, makePrisms, makeWrapped)
+import           Control.Lens (makeLenses)
 import           Data.Default (Default, def)
 import qualified Data.HashMap.Strict as HM
 import qualified Data.Map as M (lookup, member, toList)
@@ -37,9 +35,12 @@ import           Data.Text.Lazy.Builder (Builder)
 import           Formatting (Format, later)
 import           Serokell.Util.Text (mapBuilderJson)
 
+import           Pos.Chain.Txp.Tx (TxId, TxIn, _TxOut)
+import           Pos.Chain.Txp.TxAux (TxAux)
+import           Pos.Chain.Txp.TxOutAux (TxOutAux (..))
+import           Pos.Chain.Txp.Undo (TxUndo)
 import           Pos.Core (Address, Coin, StakeholderId, unsafeAddCoin,
                      unsafeSubCoin)
-import           Pos.Core.Txp (TxAux, TxId, TxIn, TxOutAux (..), TxUndo, _TxOut)
 import qualified Pos.Util.Modifier as MM
 
 ----------------------------------------------------------------------------
@@ -71,14 +72,6 @@ utxoToModifier = foldl' (flip $ uncurry MM.insert) mempty . M.toList
 
 utxoToLookup :: Utxo -> UtxoLookup
 utxoToLookup = flip M.lookup
-
--- | Wrapper for genesis utxo.
-newtype GenesisUtxo = GenesisUtxo
-    { unGenesisUtxo :: Utxo
-    } deriving (Show)
-
-makePrisms  ''GenesisUtxo
-makeWrapped ''GenesisUtxo
 
 ----------------------------------------------------------------------------
 -- Fee

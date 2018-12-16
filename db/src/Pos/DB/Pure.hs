@@ -47,8 +47,7 @@ import qualified Data.Set as S
 import qualified Database.RocksDB as Rocks
 
 import           Pos.Binary.Class (Bi)
-import           Pos.Core (HasCoreConfiguration)
-import           Pos.Core.Block (HeaderHash)
+import           Pos.Chain.Block (HeaderHash)
 import           Pos.DB.Class (DBIteratorClass (..), DBTag (..), IterType,
                      iterKeyPrefix)
 import           Pos.DB.Functions (processIterEntry)
@@ -119,7 +118,7 @@ dbIterSourcePureDefault ::
        , DBIteratorClass i
        , Bi (IterKey i)
        , Bi (IterValue i)
-       , HasCoreConfiguration)
+       )
     => DBTag
     -> Proxy i
     -> ConduitT () (IterType i) m ()

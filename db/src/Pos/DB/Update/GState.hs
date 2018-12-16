@@ -1,4 +1,5 @@
-{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE TypeFamilies    #-}
 
 -- | Part of GState DB which stores data necessary for update system.
 
@@ -9,6 +10,7 @@ module Pos.DB.Update.GState
        , getAdoptedBVData
        , getAdoptedBVFull
        , getBVState
+       , getConsensusEra
        , getProposalState
        , getConfirmedSV
        , getMaxBlockSize
@@ -49,26 +51,25 @@ import           Serokell.Data.Memory.Units (Byte)
 import           UnliftIO (MonadUnliftIO)
 
 import           Pos.Binary.Class (serialize')
-import           Pos.Chain.Update (BlockVersionState (..),
-                     ConfirmedProposalState (..),
-                     DecidedProposalState (dpsDifficulty),
-                     HasUpdateConfiguration, ProposalState (..),
-                     UndecidedProposalState (upsSlot), bvsIsConfirmed,
-                     cpsSoftwareVersion, genesisBlockVersion,
+import           Pos.Chain.Genesis as Genesis (Config (..),
+                     configBlockVersionData, configEpochSlots)
+import           Pos.Chain.Update (ApplicationName, BlockVersion,
+                     BlockVersionData (..), BlockVersionState (..),
+                     ConfirmedProposalState (..), ConsensusEra (..),
+                     DecidedProposalState (dpsDifficulty), NumSoftwareVersion,
+                     ProposalState (..), SoftwareVersion (..),
+                     UndecidedProposalState (upsSlot), UpId,
+                     UpdateConfiguration, UpdateProposal (..), bvsIsConfirmed,
+                     consensusEraBVD, cpsSoftwareVersion, genesisBlockVersion,
                      genesisSoftwareVersions, ourAppName, ourSystemTag,
                      psProposal)
-import           Pos.Core (ChainDifficulty, HasCoreConfiguration, SlotId,
-                     StakeholderId, TimeDiff (..), epochSlots)
-import           Pos.Core.Configuration (genesisBlockVersionData)
+import           Pos.Core (ChainDifficulty, SlotId, StakeholderId,
+                     TimeDiff (..))
 import           Pos.Core.Slotting (EpochSlottingData (..), SlottingData,
                      createInitSlottingData)
-import           Pos.Core.Update (ApplicationName, BlockVersion,
-                     BlockVersionData (..), NumSoftwareVersion,
-                     SoftwareVersion (..), UpId, UpdateProposal (..))
 import           Pos.Crypto (hash)
 import           Pos.DB (DBIteratorClass (..), DBTag (..), IterType, MonadDB,
-                     MonadDBRead (..), RocksBatchOp (..), dbSerializeValue,
-                     encodeWithKeyPrefix)
+                     MonadDBRead (..), RocksBatchOp (..), encodeWithKeyPrefix)
 import           Pos.DB.Error (DBError (DBMalformed))
 import           Pos.DB.GState.Common (gsGetBi, writeBatchGState)
 import           Pos.Util.Util (maybeThrow)
@@ -91,6 +92,10 @@ getAdoptedBVFull = maybeThrow (DBMalformed msg) =<< getAdoptedBVFullMaybe
   where
     msg =
         "Update System part of GState DB is not initialized (last adopted BV is missing)"
+
+-- | Get the ConsensusEra from the database.
+getConsensusEra :: MonadDBRead m => m ConsensusEra
+getConsensusEra = consensusEraBVD <$> getAdoptedBVData
 
 -- | Get maximum block size (in bytes).
 getMaxBlockSize :: MonadDBRead m => m Byte
@@ -138,49 +143,50 @@ data UpdateOp
     | PutSlottingData !SlottingData
     | PutEpochProposers !(HashSet StakeholderId)
 
-instance HasCoreConfiguration => RocksBatchOp UpdateOp where
+instance RocksBatchOp UpdateOp where
     toBatchOp (PutProposal ps) =
-        [ Rocks.Put (proposalKey upId) (dbSerializeValue ps)]
+        [ Rocks.Put (proposalKey upId) (serialize' ps)]
       where
         up = psProposal ps
         upId = hash up
     toBatchOp (DeleteProposal upId) =
         [Rocks.Del (proposalKey upId)]
     toBatchOp (ConfirmVersion sv) =
-        [Rocks.Put (confirmedVersionKey $ svAppName sv) (dbSerializeValue $ svNumber sv)]
+        [Rocks.Put (confirmedVersionKey $ svAppName sv) (serialize' $ svNumber sv)]
     toBatchOp (DelConfirmedVersion app) =
         [Rocks.Del (confirmedVersionKey app)]
     toBatchOp (AddConfirmedProposal cps) =
-        [Rocks.Put (confirmedProposalKey cps) (dbSerializeValue cps)]
+        [Rocks.Put (confirmedProposalKey cps) (serialize' cps)]
     toBatchOp (DelConfirmedProposal sv) =
         [Rocks.Del (confirmedProposalKeySV sv)]
     toBatchOp (SetAdopted bv bvd) =
-        [Rocks.Put adoptedBVKey (dbSerializeValue (bv, bvd))]
+        [Rocks.Put adoptedBVKey (serialize' (bv, bvd))]
     toBatchOp (SetBVState bv st) =
-        [Rocks.Put (bvStateKey bv) (dbSerializeValue st)]
+        [Rocks.Put (bvStateKey bv) (serialize' st)]
     toBatchOp (DelBV bv) =
         [Rocks.Del (bvStateKey bv)]
     toBatchOp (PutSlottingData sd) =
-        [Rocks.Put slottingDataKey (dbSerializeValue sd)]
+        [Rocks.Put slottingDataKey (serialize' sd)]
     toBatchOp (PutEpochProposers proposers) =
-        [Rocks.Put epochProposersKey (dbSerializeValue proposers)]
+        [Rocks.Put epochProposersKey (serialize' proposers)]
 
 ----------------------------------------------------------------------------
 -- Initialization
 ----------------------------------------------------------------------------
 
-initGStateUS :: MonadDB m => m ()
-initGStateUS = do
+initGStateUS :: MonadDB m => Genesis.Config -> m ()
+initGStateUS genesisConfig = do
     writeBatchGState $
         PutSlottingData genesisSlottingData :
         PutEpochProposers mempty :
-        SetAdopted genesisBlockVersion genesisBlockVersionData :
+        SetAdopted genesisBlockVersion genesisBvd :
         map ConfirmVersion genesisSoftwareVersions
   where
-    genesisSlotDuration = bvdSlotDuration genesisBlockVersionData
+    genesisBvd = configBlockVersionData genesisConfig
+    genesisSlotDuration = bvdSlotDuration genesisBvd
 
     genesisEpochDuration :: Microsecond
-    genesisEpochDuration = fromIntegral epochSlots * convertUnit genesisSlotDuration
+    genesisEpochDuration = fromIntegral (configEpochSlots genesisConfig) * convertUnit genesisSlotDuration
 
     esdCurrent :: EpochSlottingData
     esdCurrent = EpochSlottingData
@@ -263,9 +269,11 @@ instance DBIteratorClass ConfPropIter where
 -- software as argument.
 -- Returns __all__ confirmed proposals if the argument is 'Nothing'.
 getConfirmedProposals
-    :: (HasUpdateConfiguration, MonadDBRead m, MonadUnliftIO m)
-    => Maybe NumSoftwareVersion -> m [ConfirmedProposalState]
-getConfirmedProposals reqNsv =
+    :: (MonadDBRead m, MonadUnliftIO m)
+    => UpdateConfiguration
+    -> Maybe NumSoftwareVersion
+    -> m [ConfirmedProposalState]
+getConfirmedProposals uc reqNsv =
     runConduitRes $
     dbIterSource GStateDB (Proxy @ConfPropIter) .| CL.mapMaybe onItem .|
     CL.consume
@@ -273,11 +281,11 @@ getConfirmedProposals reqNsv =
     onItem (SoftwareVersion {..}, cps)
         | Nothing <- reqNsv = Just cps
         | Just v <- reqNsv
-        , hasOurSystemTag cps && svAppName == ourAppName && svNumber > v =
+        , hasOurSystemTag cps && svAppName == ourAppName uc && svNumber > v =
             Just cps
         | otherwise = Nothing
     hasOurSystemTag ConfirmedProposalState {..} =
-        isJust $ upData cpsUpdateProposal ^. at ourSystemTag
+        isJust $ upData cpsUpdateProposal ^. at (ourSystemTag uc)
 
 -- Iterator by block versions
 data BVIter

@@ -1,42 +1,45 @@
-{ localLib ? import ./../../../../lib.nix
-, config ? {}
+with import ../../../../lib.nix;
+
+{ stdenv, writeScript, gnugrep
+
+, cardano-sl-tools, cardano-wallet
+, demoCluster
+
+## options for tests
 , numCoreNodes ? 4
-, stateDir ? localLib.maybeEnv "CARDANO_STATE_DIR" "./state-demo"
-, system ? builtins.currentSystem
-, pkgs ? import localLib.fetchNixPkgs { inherit system config; }
-, gitrev ? "123456" # Dummy git revision to prevent mass rebuilds
+, stateDir ? maybeEnv "CARDANO_STATE_DIR" "./state-demo"
 , ghcRuntimeArgs ? "-N2 -qg -A1m -I0 -T"
 , additionalNodeArgs ? ""
 , useStackBinaries ? false
 }:
 
-with localLib;
 
 let
   stackExec = optionalString useStackBinaries "stack exec -- ";
-  cardanoDeps = with iohkPkgs; [ cardano-sl-tools ];
-  integrationTestDeps = with pkgs; [ gnugrep ];
+  cardanoDeps = [ cardano-sl-tools cardano-wallet ];
+  integrationTestDeps = [ gnugrep ];
   allDeps = integrationTestDeps ++ (optionals (!useStackBinaries ) cardanoDeps);
-  demo-cluster = iohkPkgs.demoCluster.override {
-    inherit gitrev numCoreNodes stateDir useStackBinaries;
+  demo-cluster = demoCluster.override {
+    inherit numCoreNodes stateDir;
     keepAlive = false;
     assetLockAddresses = [ "DdzFFzCqrhswMWoTiWaqXUDZJuYUx63qB6Aq8rbVbhFbc8NWqhpZkC7Lhn5eVA7kWf4JwKvJ9PqQF78AewMCzDZLabkzm99rFzpNDKp5" ];
   };
-  executables =  {
-    integration-test = "${iohkPkgs.cardano-sl-wallet-new}/bin/wal-integr-test";
-  };
-  iohkPkgs = import ./../../../.. { inherit config system pkgs gitrev; };
-in pkgs.writeScript "integration-tests" ''
-  #!${pkgs.stdenv.shell}
-  export PATH=${pkgs.lib.makeBinPath allDeps}:$PATH
+in writeScript "integration-tests" ''
+  #!${stdenv.shell}
+  export PATH=${stdenv.lib.makeBinPath allDeps}:$PATH
   set -e
   source ${demo-cluster}
-  ${stackExec}wal-integr-test --tls-ca-cert ${stateDir}/tls/client/ca.crt --tls-client-cert ${stateDir}/tls/client/client.pem --tls-key ${stateDir}/tls/client/client.key
-  EXIT_STATUS=$?
+  echo "Demo Cluster Started"
+  set +e
+  echo "Running Wallet Integration tests"
+  ${stackExec}wal-integr-test --tls-ca-cert ${stateDir}/tls/edge/ca.crt --tls-client-cert ${stateDir}/tls/edge/client.pem --tls-key ${stateDir}/tls/edge/client.key "$@" 2>&1 | tee state-demo/logs/test.output
+  EXIT_STATUS=$PIPESTATUS
+  echo "Wallet Integration tests completed"
   # Verify we see "transaction list is empty after filtering out asset-locked source addresses" in at least 1 core node log file
   if [[ $EXIT_STATUS -eq 0 ]]
   then
-    grep "transaction list is empty after filtering out asset-locked source addresses" state-demo/logs/core*.json
+    echo "EXIT_STATUS is 0 => verify asset-locked source addresses"
+    grep -r "transaction list is empty after filtering out asset-locked source addresses" ${stateDir}/logs
     EXIT_STATUS=$?
   fi
   stop_cardano

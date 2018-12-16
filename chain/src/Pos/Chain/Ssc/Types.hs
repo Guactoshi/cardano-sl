@@ -5,7 +5,7 @@
 {-# LANGUAGE TypeFamilies    #-}
 
 -- | Some types related to SSC. There are also types in
--- "Pos.Core.Ssc".
+-- "Pos.Chain.Ssc".
 
 module Pos.Chain.Ssc.Types
        (
@@ -34,7 +34,6 @@ module Pos.Chain.Ssc.Types
        , createSscContext
        ) where
 
-import           Control.DeepSeq (NFData)
 import           Control.Lens (makeLenses)
 import           Data.Default (Default, def)
 import qualified Data.HashMap.Strict as HM
@@ -48,13 +47,18 @@ import           Universum
 
 import           Pos.Binary.Class (Cons (..), Field (..), deriveSimpleBi,
                      deriveSimpleBiCxt)
+import           Pos.Chain.Block.ComponentBlock (ComponentBlock (..))
 import           Pos.Chain.Ssc.Behavior (SscBehavior)
+import           Pos.Chain.Ssc.Commitment (SignedCommitment)
+import           Pos.Chain.Ssc.CommitmentsMap
+                     (CommitmentsMap (getCommitmentsMap))
+import           Pos.Chain.Ssc.Opening (Opening)
+import           Pos.Chain.Ssc.OpeningsMap (OpeningsMap)
+import           Pos.Chain.Ssc.Payload (SscPayload)
+import           Pos.Chain.Ssc.SharesMap (SharesMap)
 import           Pos.Chain.Ssc.Toss.Types (TossModifier)
 import           Pos.Chain.Ssc.VssCertData as VCD
 import           Pos.Core (EpochIndex)
-import           Pos.Core.Block (ComponentBlock (..))
-import           Pos.Core.Ssc (CommitmentsMap (getCommitmentsMap), Opening,
-                     OpeningsMap, SharesMap, SignedCommitment, SscPayload)
 import           Pos.Crypto (VssKeyPair)
 
 ----------------------------------------------------------------------------
@@ -73,8 +77,6 @@ data SscGlobalState = SscGlobalState
       -- received from stakeholders.
     , _sgsVssCertificates :: !VCD.VssCertData
     } deriving (Eq, Show, Generic)
-
-instance NFData SscGlobalState
 
 makeLenses ''SscGlobalState
 

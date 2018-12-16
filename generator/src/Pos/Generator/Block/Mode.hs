@@ -1,5 +1,6 @@
-{-# LANGUAGE DataKinds    #-}
-{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE DataKinds       #-}
+{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE TypeFamilies    #-}
 
 -- | Execution mode used by blockchain generator.
 
@@ -25,27 +26,25 @@ import           Control.Lens.TH (makeLensesWith)
 import           Control.Monad.Random.Strict (RandT)
 import qualified Crypto.Random as Rand
 import           Data.Default (Default)
-import           System.Wlog (WithLogger, logWarning)
 import           UnliftIO (MonadUnliftIO)
 
 import           Pos.Chain.Block (HasSlogGState (..))
 import           Pos.Chain.Delegation (DelegationVar, HasDlgConfiguration)
+import           Pos.Chain.Genesis (GenesisWStakeholders (..))
 import           Pos.Chain.Ssc (HasSscConfiguration, SscMemTag, SscState)
-import           Pos.Chain.Update (HasUpdateConfiguration)
+import           Pos.Chain.Update (UpdateConfiguration)
 import           Pos.Client.Txp.Addresses (MonadAddresses (..))
 import           Pos.Configuration (HasNodeConfiguration)
-import           Pos.Core (Address, HasConfiguration, HasPrimaryKey (..),
-                     SlotId (..), Timestamp, epochOrSlotToSlot, getEpochOrSlot,
+import           Pos.Core (Address, HasPrimaryKey (..), SlotCount, SlotId (..),
+                     Timestamp, epochOrSlotToSlot, getEpochOrSlot,
                      largestPubKeyAddressBoot)
 import           Pos.Core.Exception (reportFatalError)
-import           Pos.Core.Genesis (GenesisWStakeholders (..))
 import           Pos.Core.Reporting (HasMisbehaviorMetrics (..),
                      MonadReporting (..))
 import           Pos.Crypto (SecretKey)
 import           Pos.DB (DBSum, MonadDB, MonadDBRead)
 import qualified Pos.DB as DB
-import           Pos.DB.Block (MonadBListener (..), dbGetSerBlockSumDefault,
-                     dbGetSerUndoSumDefault, dbPutSerBlundsSumDefault)
+import           Pos.DB.Block (MonadBListener (..))
 import qualified Pos.DB.Block as DB
 import           Pos.DB.DB (gsAdoptedBVDataDefault)
 import           Pos.DB.Delegation (mkDelegationVar)
@@ -61,7 +60,9 @@ import           Pos.Infra.Network.Types (HasNodeType (..), NodeType (..))
 import           Pos.Infra.Slotting (HasSlottingVar (..), MonadSlots (..),
                      MonadSlotsData, currentTimeSlottingSimple)
 import           Pos.Infra.Slotting.Types (SlottingData)
-import           Pos.Util (HasLens (..), newInitFuture, postfixLFields)
+import           Pos.Util (HasLens (..), HasLens', newInitFuture,
+                     postfixLFields)
+import           Pos.Util.Wlog (WithLogger, logWarning)
 
 
 ----------------------------------------------------------------------------
@@ -75,8 +76,6 @@ type MonadBlockGenBase m
        , MonadMask m
        , MonadIO m
        , MonadUnliftIO m
-       , HasConfiguration
-       , HasUpdateConfiguration
        , HasSscConfiguration
        , HasNodeConfiguration
        , HasDlgConfiguration
@@ -92,6 +91,7 @@ type MonadBlockGen ctx m
        , HasSlottingVar ctx
        , HasSlogGState ctx
        , HasLrcContext ctx
+       , HasLens' ctx UpdateConfiguration
        , MonadBListener m
        )
 
@@ -107,7 +107,7 @@ type MonadBlockGenInit ctx m
 
 -- | Context used by blockchain generator.
 data BlockGenContext ext = BlockGenContext
-    { bgcPrimaryKey        :: SecretKey
+    { bgcPrimaryKey          :: SecretKey
     -- ^ This field is lazy on purpose. Primary key used for block
     -- generation changes frequently. We don't define it initially and
     -- modify it using 'local' when we need it. Alternative solution
@@ -115,20 +115,21 @@ data BlockGenContext ext = BlockGenContext
     -- primary key, but it would lead to enormous amount of
     -- boilerplate. Also it could be put into mutable reference, but
     -- it's complicated too.
-    , bgcGState            :: !GS.GStateContext
+    , bgcGState              :: !GS.GStateContext
     -- ^ Currently we always use pure DB and assume it always fits in
     -- memory. It allows us to simply clone existing DB.
-    , bgcSystemStart       :: !Timestamp
-    , bgcParams            :: !BlockGenParams
-    , bgcDelegation        :: !DelegationVar
-    , bgcGenStakeholders   :: !GenesisWStakeholders
-    , bgcTxpMem            :: !(GenericTxpLocalData ext)
-    , bgcUpdateContext     :: !UpdateContext
-    , bgcSscState          :: !SscState
-    , bgcSlotId            :: !(Maybe SlotId)
+    , bgcSystemStart         :: !Timestamp
+    , bgcParams              :: !BlockGenParams
+    , bgcDelegation          :: !DelegationVar
+    , bgcGenStakeholders     :: !GenesisWStakeholders
+    , bgcTxpMem              :: !(GenericTxpLocalData ext)
+    , bgcUpdateContext       :: !UpdateContext
+    , bgcSscState            :: !SscState
+    , bgcSlotId              :: !(Maybe SlotId)
     -- ^ During block generation we don't want to use real time, but
     -- rather want to set current slot (fake one) by ourselves.
-    , bgcTxpGlobalSettings :: !TxpGlobalSettings
+    , bgcTxpGlobalSettings   :: !TxpGlobalSettings
+    , bgcUpdateConfiguration :: !UpdateConfiguration
     }
 
 makeLensesWith postfixLFields ''BlockGenContext
@@ -147,13 +148,12 @@ type BlockGenRandMode ext g m = RandT g (BlockGenMode ext m)
 -- context. Persistent data (DB) is cloned. Other mutable data is
 -- recreated.
 mkBlockGenContext
-    :: forall ext ctx m.
-       ( MonadBlockGenInit ctx m
-       , Default ext
-       )
-    => BlockGenParams
+    :: forall ext ctx m
+     . (MonadBlockGenInit ctx m, Default ext)
+    => SlotCount
+    -> BlockGenParams
     -> m (BlockGenContext ext)
-mkBlockGenContext bgcParams@BlockGenParams{..} = do
+mkBlockGenContext epochSlots bgcParams@BlockGenParams{..} = do
     let bgcPrimaryKey = error "bgcPrimaryKey was forced before being set"
     bgcGState <- if _bgpInplaceDB
                  then view GS.gStateContext
@@ -170,11 +170,12 @@ mkBlockGenContext bgcParams@BlockGenParams{..} = do
                 (bgcGState ^. GS.gscSlottingVar)
                 (bgcGState ^. GS.gscLrcContext)
                 initSlot
+    bgcUpdateConfiguration <- view (lensOf @UpdateConfiguration)
     usingReaderT initCtx $ do
         tipEOS <- getEpochOrSlot <$> DB.getTipHeader
         putInitSlot (epochOrSlotToSlot tipEOS)
-        bgcSscState <- mkSscState
-        bgcUpdateContext <- mkUpdateContext
+        bgcSscState <- mkSscState epochSlots
+        bgcUpdateContext <- mkUpdateContext epochSlots
         bgcTxpMem <- mkTxpLocalData
         bgcDelegation <- mkDelegationVar
         return BlockGenContext {..}
@@ -206,22 +207,23 @@ instance HasSlottingVar InitBlockGenContext where
 instance MonadBlockGenBase m => MonadDBRead (InitBlockGenMode ext m) where
     dbGet = DB.dbGetSumDefault
     dbIterSource = DB.dbIterSourceSumDefault
-    dbGetSerBlock = dbGetSerBlockSumDefault
-    dbGetSerUndo = dbGetSerUndoSumDefault
+    dbGetSerBlock = DB.dbGetSerBlockSumDefault
+    dbGetSerUndo = DB.dbGetSerUndoSumDefault
+    dbGetSerBlund = DB.dbGetSerBlundSumDefault
 
 instance MonadBlockGenBase m => MonadDB (InitBlockGenMode ext m) where
     dbPut = DB.dbPutSumDefault
     dbWriteBatch = DB.dbWriteBatchSumDefault
     dbDelete = DB.dbDeleteSumDefault
-    dbPutSerBlunds = dbPutSerBlundsSumDefault
+    dbPutSerBlunds = DB.dbPutSerBlundsSumDefault
 
 instance (MonadBlockGenBase m, MonadSlotsData ctx (InitBlockGenMode ext m))
       => MonadSlots ctx (InitBlockGenMode ext m)
   where
-    getCurrentSlot           = Just <$> view ibgcSlot_L
-    getCurrentSlotBlocking   = view ibgcSlot_L
-    getCurrentSlotInaccurate = view ibgcSlot_L
-    currentTimeSlotting      = do
+    getCurrentSlot _           = Just <$> view ibgcSlot_L
+    getCurrentSlotBlocking _   = view ibgcSlot_L
+    getCurrentSlotInaccurate _ = view ibgcSlot_L
+    currentTimeSlotting        = do
         logWarning "currentTimeSlotting is used in initialization"
         currentTimeSlottingSimple
 
@@ -247,6 +249,9 @@ instance HasSlottingVar (BlockGenContext ext) where
 
 instance HasLens GenesisWStakeholders (BlockGenContext ext) GenesisWStakeholders where
     lensOf = bgcGenStakeholders_L
+
+instance HasLens UpdateConfiguration (BlockGenContext ext) UpdateConfiguration where
+    lensOf = bgcUpdateConfiguration_L
 
 instance HasLens DBSum (BlockGenContext ext) DBSum where
     lensOf = GS.gStateContext . GS.gscDB
@@ -298,6 +303,7 @@ instance MonadBlockGenBase m => MonadDBRead (BlockGenMode ext m) where
     dbIterSource = DB.dbIterSourceSumDefault
     dbGetSerBlock = DB.dbGetSerBlockSumDefault
     dbGetSerUndo = DB.dbGetSerUndoSumDefault
+    dbGetSerBlund = DB.dbGetSerBlundSumDefault
 
 instance MonadBlockGenBase m => MonadDB (BlockGenMode ext m) where
     dbPut = DB.dbPutSumDefault
@@ -308,14 +314,14 @@ instance MonadBlockGenBase m => MonadDB (BlockGenMode ext m) where
 instance (MonadBlockGenBase m, MonadSlotsData ctx (BlockGenMode ext m))
       => MonadSlots ctx (BlockGenMode ext m)
   where
-    getCurrentSlot = view bgcSlotId_L
-    getCurrentSlotBlocking =
+    getCurrentSlot _ = view bgcSlotId_L
+    getCurrentSlotBlocking _ =
         view bgcSlotId_L >>= \case
             Nothing ->
                 reportFatalError
                     "getCurrentSlotBlocking is used in generator when slot is unknown"
             Just slot -> pure slot
-    getCurrentSlotInaccurate =
+    getCurrentSlotInaccurate _ =
         reportFatalError
             "It hardly makes sense to use 'getCurrentSlotInaccurate' during block generation"
     currentTimeSlotting = currentTimeSlottingSimple
@@ -324,19 +330,19 @@ instance MonadBlockGenBase m => DB.MonadGState (BlockGenMode ext m) where
     gsAdoptedBVData = gsAdoptedBVDataDefault
 
 instance MonadBListener m => MonadBListener (BlockGenMode ext m) where
-    onApplyBlocks = lift . onApplyBlocks
-    onRollbackBlocks = lift . onRollbackBlocks
+    onApplyBlocks nm = lift . onApplyBlocks nm
+    onRollbackBlocks nm pc = lift . (onRollbackBlocks nm pc)
 
 
 instance Monad m => MonadAddresses (BlockGenMode ext m) where
     type AddrData (BlockGenMode ext m) = Address
-    getNewAddress = pure
+    getNewAddress _ _ = pure
     -- It must be consistent with the way we construct address in
     -- block-gen. If it's changed, tests will fail, so we will notice
     -- it.
     -- N.B. Currently block-gen uses only PubKey addresses with BootstrapEra
     -- distribution.
-    getFakeChangeAddress = pure largestPubKeyAddressBoot
+    getFakeChangeAddress nm _ = pure (largestPubKeyAddressBoot nm)
 
 type instance MempoolExt (BlockGenMode ext m) = ext
 

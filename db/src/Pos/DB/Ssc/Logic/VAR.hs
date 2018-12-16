@@ -17,31 +17,30 @@ import qualified Crypto.Random as Rand
 import qualified Data.HashMap.Strict as HM
 import           Formatting (build, int, sformat, (%))
 import           Serokell.Util (listJson)
-import           System.Wlog (WithLogger, logDebug)
 import           Universum
 
+import           Pos.Chain.Block (ComponentBlock (..), HeaderHash, headerHash)
+import           Pos.Chain.Genesis as Genesis (Config, configBlockVersionData)
 import           Pos.Chain.Lrc (RichmenStakes)
 import           Pos.Chain.Ssc (HasSscConfiguration, MonadSscMem,
                      MultiRichmenStakes, PureToss, SscBlock,
-                     SscGlobalState (..), SscGlobalUpdate, SscVerifyError (..),
-                     applyGenesisBlock, askSscMem, rollbackSsc,
-                     runPureTossWithLogger, sscGlobal,
+                     SscGlobalState (..), SscGlobalUpdate, SscPayload (..),
+                     SscVerifyError (..), applyGenesisBlock, askSscMem,
+                     rollbackSsc, runPureTossWithLogger, sscGlobal,
                      sscIsCriticalVerifyError, sscRunGlobalUpdate,
                      supplyPureTossEnv, verifyAndApplySscPayload)
-import           Pos.Core (HasCoreConfiguration, HasGenesisData,
-                     HasProtocolConstants, epochIndexL, epochOrSlotG)
-import           Pos.Core.Block (ComponentBlock (..), HeaderHash, headerHash)
+import           Pos.Chain.Update (BlockVersionData)
+import           Pos.Core (SlotCount, epochIndexL, epochOrSlotG)
 import           Pos.Core.Chrono (NE, NewestFirst (..), OldestFirst (..))
 import           Pos.Core.Exception (assertionFailed)
 import           Pos.Core.Reporting (MonadReporting, reportError)
-import           Pos.Core.Ssc (SscPayload (..))
-import           Pos.Core.Update (BlockVersionData)
-import           Pos.Crypto (ProtocolMagic)
-import           Pos.DB (MonadDBRead, MonadGState, SomeBatchOp (..))
+import           Pos.DB (MonadDBRead, MonadGState, SomeBatchOp (..),
+                     gsAdoptedBVData)
 import           Pos.DB.Lrc (HasLrcContext, getSscRichmen)
 import qualified Pos.DB.Ssc.GState as DB
 import           Pos.Util.AssertMode (inAssertMode)
 import           Pos.Util.Lens (_neHead, _neLast)
+import           Pos.Util.Wlog (WithLogger, logDebug)
 
 ----------------------------------------------------------------------------
 -- Modes
@@ -75,11 +74,10 @@ type SscGlobalApplyMode ctx m = SscGlobalVerifyMode ctx m
 -- All blocks must be from the same epoch.
 sscVerifyBlocks
     :: SscGlobalVerifyMode ctx m
-    => ProtocolMagic
-    -> BlockVersionData
+    => Genesis.Config
     -> OldestFirst NE SscBlock
     -> m (Either SscVerifyError SscGlobalState)
-sscVerifyBlocks pm bvd blocks = do
+sscVerifyBlocks genesisConfig blocks = do
     let epoch = blocks ^. _Wrapped . _neHead . epochIndexL
     let lastEpoch = blocks ^. _Wrapped . _neLast . epochIndexL
     let differentEpochsMsg =
@@ -89,12 +87,15 @@ sscVerifyBlocks pm bvd blocks = do
                 lastEpoch
     inAssertMode $ unless (epoch == lastEpoch) $
         assertionFailed differentEpochsMsg
-    richmenSet <- getSscRichmen "sscVerifyBlocks" epoch
+    richmenSet <- getSscRichmen (configBlockVersionData genesisConfig)
+                                "sscVerifyBlocks"
+                                epoch
+    bvd <- gsAdoptedBVData
     globalVar <- sscGlobal <$> askSscMem
     gs <- readTVarIO globalVar
     res <-
         runExceptT
-            (execStateT (sscVerifyAndApplyBlocks pm richmenSet bvd blocks) gs)
+            (execStateT (sscVerifyAndApplyBlocks genesisConfig richmenSet bvd blocks) gs)
     case res of
         Left e
             | sscIsCriticalVerifyError e ->
@@ -111,20 +112,19 @@ sscVerifyBlocks pm bvd blocks = do
 -- argument (it can be calculated in advance using 'sscVerifyBlocks').
 sscApplyBlocks
     :: SscGlobalApplyMode ctx m
-    => ProtocolMagic
-    -> BlockVersionData
+    => Genesis.Config
     -> OldestFirst NE SscBlock
     -> Maybe SscGlobalState
     -> m [SomeBatchOp]
-sscApplyBlocks pm bvd blocks (Just newState) = do
+sscApplyBlocks genesisConfig blocks (Just newState) = do
     inAssertMode $ do
         let hashes = map headerHash blocks
-        expectedState <- sscVerifyValidBlocks pm bvd blocks
+        expectedState <- sscVerifyValidBlocks genesisConfig blocks
         if | newState == expectedState -> pass
            | otherwise -> onUnexpectedVerify hashes
     sscApplyBlocksFinish newState
-sscApplyBlocks pm bvd blocks Nothing =
-    sscApplyBlocksFinish =<< sscVerifyValidBlocks pm bvd blocks
+sscApplyBlocks genesisConfig blocks Nothing =
+    sscApplyBlocksFinish =<< sscVerifyValidBlocks genesisConfig blocks
 
 sscApplyBlocksFinish
     :: (SscGlobalApplyMode ctx m)
@@ -138,12 +138,11 @@ sscApplyBlocksFinish gs = do
 
 sscVerifyValidBlocks
     :: SscGlobalApplyMode ctx m
-    => ProtocolMagic
-    -> BlockVersionData
+    => Genesis.Config
     -> OldestFirst NE SscBlock
     -> m SscGlobalState
-sscVerifyValidBlocks pm bvd blocks =
-    sscVerifyBlocks pm bvd blocks >>= \case
+sscVerifyValidBlocks genesisConfig blocks =
+    sscVerifyBlocks genesisConfig blocks >>= \case
         Left e -> onVerifyFailedInApply hashes e
         Right newState -> return newState
   where
@@ -177,32 +176,32 @@ onVerifyFailedInApply hashes e = assertionFailed msg
 -- | Verify SSC-related part of given blocks with respect to current GState
 -- and apply them on success. Blocks must be from the same epoch.
 sscVerifyAndApplyBlocks
-    :: (SscVerifyMode m, HasProtocolConstants, HasGenesisData)
-    => ProtocolMagic
+    :: SscVerifyMode m
+    => Genesis.Config
     -> RichmenStakes
     -> BlockVersionData
     -> OldestFirst NE SscBlock
     -> m ()
-sscVerifyAndApplyBlocks pm richmenStake bvd blocks =
-    verifyAndApplyMultiRichmen pm False (richmenData, bvd) blocks
+sscVerifyAndApplyBlocks genesisConfig richmenStake bvd blocks =
+    verifyAndApplyMultiRichmen genesisConfig False (richmenData, bvd) blocks
   where
     epoch = blocks ^. _Wrapped . _neHead . epochIndexL
     richmenData = HM.fromList [(epoch, richmenStake)]
 
 verifyAndApplyMultiRichmen
-    :: (SscVerifyMode m, HasProtocolConstants, HasGenesisData)
-    => ProtocolMagic
+    :: SscVerifyMode m
+    => Genesis.Config
     -> Bool
     -> (MultiRichmenStakes, BlockVersionData)
     -> OldestFirst NE SscBlock
     -> m ()
-verifyAndApplyMultiRichmen pm onlyCerts env =
+verifyAndApplyMultiRichmen genesisConfig onlyCerts env =
     tossToVerifier . hoist (supplyPureTossEnv env) .
     mapM_ verifyAndApplyDo
   where
     verifyAndApplyDo (ComponentBlockGenesis header) = applyGenesisBlock $ header ^. epochIndexL
     verifyAndApplyDo (ComponentBlockMain header payload) =
-        verifyAndApplySscPayload pm (Right header) $
+        verifyAndApplySscPayload genesisConfig (Right header) $
         filterPayload payload
     filterPayload payload
         | onlyCerts = leaveOnlyCerts payload
@@ -221,15 +220,13 @@ verifyAndApplyMultiRichmen pm onlyCerts env =
 -- happen if these blocks haven't been applied before.
 sscRollbackBlocks
     :: SscGlobalApplyMode ctx m
-    => NewestFirst NE SscBlock -> m [SomeBatchOp]
-sscRollbackBlocks blocks = sscRunGlobalUpdate $ do
-    sscRollbackU blocks
+    => SlotCount -> NewestFirst NE SscBlock -> m [SomeBatchOp]
+sscRollbackBlocks epochSlots blocks = sscRunGlobalUpdate $ do
+    sscRollbackU epochSlots blocks
     sscGlobalStateToBatch <$> get
 
-sscRollbackU
-  :: (HasProtocolConstants, HasGenesisData)
-  => NewestFirst NE SscBlock -> SscGlobalUpdate ()
-sscRollbackU blocks = tossToUpdate $ rollbackSsc oldestEOS payloads
+sscRollbackU :: SlotCount -> NewestFirst NE SscBlock -> SscGlobalUpdate ()
+sscRollbackU epochSlots blocks = tossToUpdate $ rollbackSsc epochSlots oldestEOS payloads
   where
     oldestEOS = blocks ^. _Wrapped . _neLast . epochOrSlotG
     payloads = NewestFirst $ mapMaybe extractPayload $ toList blocks
@@ -259,5 +256,5 @@ tossToVerifier action = do
         Right res -> (identity .= newState) $> res
 
 -- | Dump global state to DB.
-sscGlobalStateToBatch :: (HasCoreConfiguration) => SscGlobalState -> [SomeBatchOp]
+sscGlobalStateToBatch :: SscGlobalState -> [SomeBatchOp]
 sscGlobalStateToBatch = one . SomeBatchOp . DB.sscGlobalStateToBatch

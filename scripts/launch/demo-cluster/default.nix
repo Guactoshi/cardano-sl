@@ -1,149 +1,107 @@
-{ localLib ? import ./../../../lib.nix
-, stateDir ? localLib.maybeEnv "CARDANO_STATE_DIR" "./state-demo"
-, config ? {}
+with import ../../../lib.nix;
+
+{ stdenv, runCommand, writeText, writeScript
+, jq, coreutils, curl, gnused, openssl
+
+, cardano-sl-cluster, cardano-sl, cardano-wallet
+
+, useStackBinaries ? false
+
+## lots of options!
+, stateDir ? maybeEnv "CARDANO_STATE_DIR" "./state-demo"
 , runWallet ? true
 , runExplorer ? false
 , numCoreNodes ? 4
 , numRelayNodes ? 1
 , numImportedWallets ? 11
 , assetLockAddresses ? []
-, system ? builtins.currentSystem
-, pkgs ? import localLib.fetchNixPkgs { inherit system config; }
-, gitrev ? localLib.commitIdFromGitRepo ./../../../.git
 , ghcRuntimeArgs ? "-N2 -qg -A1m -I0 -T"
 , additionalNodeArgs ? ""
 , keepAlive ? true
-, launchGenesis ? false
 , configurationKey ? "default"
-, useStackBinaries ? false
 , disableClientAuth ? false
+, walletListen ? "127.0.0.1:8090"
+, walletDocListen ? "127.0.0.1:8190"
 }:
-
-with localLib;
 
 let
   stackExec = optionalString useStackBinaries "stack exec -- ";
-  cardanoDeps = with iohkPkgs; [ cardano-sl-tools cardano-sl-wallet-new cardano-sl-node-static ];
-  demoClusterDeps = with pkgs; [ jq coreutils curl gnused openssl ];
+  cardanoDeps = [ cardano-sl-cluster cardano-wallet ];
+  demoClusterDeps = [ jq coreutils curl gnused openssl ];
   allDeps =  demoClusterDeps ++ (optionals (!useStackBinaries ) cardanoDeps);
-  walletConfig = {
-    inherit stateDir disableClientAuth;
-    topologyFile = walletTopologyFile;
-    environment = "demo";
-  };
-  walletEnvironment = if launchGenesis then {
-    environment = "override";
-    relays = "127.0.0.1";
-    confKey = "testnet_full";
-    confFile = "${stateDir}/configuration.yaml";
-  } else {
-    environment = "demo";
-  };
-  demoWallet = pkgs.callPackage ./../connect-to-cluster ({ inherit gitrev useStackBinaries; debug = false; } // walletEnvironment // walletConfig);
   ifWallet = optionalString (runWallet);
+  numEdgeNodes = if runWallet then 1 else 0;
   ifKeepAlive = optionalString (keepAlive);
-  iohkPkgs = import ./../../.. { inherit config system pkgs gitrev; };
-  src = ./../../..;
-  topologyFile = import ./make-topology.nix { inherit (pkgs) lib; cores = numCoreNodes; relays = numRelayNodes; };
-  walletTopologyFile = builtins.toFile "wallet-topology.yaml" (builtins.toJSON {
-    wallet = {
-      relays = [ [ { addr = "127.0.0.1"; port = 3101; } ] ];
-      valency = 1;
-      fallbacks = 1;
-    };
-  });
-  assetLockFile = pkgs.writeText "asset-lock-file" (intersperse "\n" assetLockAddresses);
+  topologyFile = import ./make-topology.nix { inherit (stdenv) lib; cores = numCoreNodes; relays = numRelayNodes; };
+  assetLockFile = writeText "asset-lock-file" (intersperse "\n" assetLockAddresses);
   ifAssetLock = optionalString (assetLockAddresses != []);
-  configFiles = pkgs.runCommand "cardano-config" {} ''
+  ifDisableClientAuth = optionalString disableClientAuth;
+  configFiles = runCommand "cardano-config" {} ''
       mkdir -pv $out
       cd $out
-      cp -vi ${iohkPkgs.cardano-sl.src + "/configuration.yaml"} configuration.yaml
-      cp -vi ${iohkPkgs.cardano-sl.src + "/mainnet-genesis-dryrun-with-stakeholders.json"} mainnet-genesis-dryrun-with-stakeholders.json
-      cp -vi ${iohkPkgs.cardano-sl.src + "/mainnet-genesis.json"} mainnet-genesis.json
+      cp -vi ${cardano-sl.src + "/configuration.yaml"} configuration.yaml
+      cp -vi ${cardano-sl.src + "/mainnet-genesis-dryrun-with-stakeholders.json"} mainnet-genesis-dryrun-with-stakeholders.json
+      cp -vi ${cardano-sl.src + "/mainnet-genesis.json"} mainnet-genesis.json
     '';
-  prepareGenesis = import ../../prepare-genesis {
-    inherit config system pkgs gitrev numCoreNodes;
+
+  prepareGenesis = callPackage ../../prepare-genesis {
+    inherit numCoreNodes stateDir;
     configurationKey = "testnet_full";
     configurationKeyLaunch = "testnet_launch";
   };
 
-in pkgs.writeScript "demo-cluster" ''
-  #!${pkgs.stdenv.shell}
-  export PATH=${pkgs.lib.makeBinPath allDeps}:$PATH
+in writeScript "demo-cluster" ''
+  #!${stdenv.shell} -e
+  export PATH=${stdenv.lib.makeBinPath allDeps}:$PATH
+  export DEMO_STATE_DIR=${stateDir}
+  export DEMO_CONFIGURATION_FILE=${configFiles}/configuration.yaml
+  export DEMO_SYSTEM_START=$(($(date +%s) + 14))
+  ${ifAssetLock "export DEMO_ASSET_LOCK_FILE=${assetLockFile}"}
+  ${ifDisableClientAuth "export DEMO_NO_CLIENT_AUTH=True"}
   # Set to 0 (passing) by default. Tests using this cluster can set this variable
   # to force the `stop_cardano` function to exit with a different code.
   EXIT_STATUS=0
   function stop_cardano {
     trap "" INT TERM
     echo "Received TERM!"
-    echo "Stopping Cardano core nodes"
-    for pid in ''${core_pid[@]}
-    do
-      echo killing pid $pid
-      kill $pid
-    done
-    for pid in ''${relay_pid[@]}
-    do
-      echo killing pid $pid
-      kill $pid
-    done
-    ${ifWallet ''
-      echo killing wallet pid $wallet_pid
-    kill $wallet_pid
-    ''}
-    wait
+    echo "Stopping Cardano Demo Cluster"
+    kill $pidCluster
+    kill $pidWallet
     echo "Stopped all Cardano processes, exiting with code $EXIT_STATUS!"
     exit $EXIT_STATUS
   }
-  system_start=$((`date +%s` + 15))
-  echo "Using system start time "$system_start
-
-
 
   # Remove previous state
   rm -rf ${stateDir}
   mkdir -p ${stateDir}/logs
 
-  ${if launchGenesis then ''
-    echo "Creating genesis data and keys using external method..."
-    config_files=${stateDir}
-    ${prepareGenesis} $config_files
-  '' else ''
-    echo "Creating genesis keys..."
-    config_files=${configFiles}
-    ${stackExec}cardano-keygen --system-start 0 generate-keys-by-spec --genesis-out-dir ${stateDir}/genesis-keys --configuration-file $config_files/configuration.yaml --configuration-key ${configurationKey}
-  ''}
-
   trap "stop_cardano" INT TERM
   echo "Launching a demo cluster..."
-  for i in {1..${builtins.toString numCoreNodes}}
-  do
-    node_args="--db-path ${stateDir}/core-db$i --rebuild-db ${if launchGenesis then "--keyfile ${stateDir}/genesis-keys/generated-keys/rich/key$((i - 1)).sk" else "--genesis-secret $i"} --listen 127.0.0.1:$((3000 + i)) --json-log ${stateDir}/logs/core$i.json --logs-prefix ${stateDir}/logs --system-start $system_start --metrics +RTS -N2 -qg -A1m -I0 -T -RTS --node-id core$i --topology ${topologyFile} --configuration-file $config_files/configuration.yaml --configuration-key ${configurationKey} ${ifAssetLock "--asset-lock-file ${assetLockFile}"}"
-    echo Launching core node $i: cardano-node-simple $node_args
-    ${stackExec}cardano-node-simple $node_args &> ${stateDir}/logs/core$i.log &
-    core_pid[$i]=$!
+  ${stackExec}cardano-sl-cluster-prepare-environment "DEMO_" --cores ${builtins.toString numCoreNodes} --relays ${builtins.toString numRelayNodes} --edges ${builtins.toString numEdgeNodes}
+  ${stackExec}cardano-sl-cluster-demo --cores ${builtins.toString numCoreNodes} --relays ${builtins.toString numRelayNodes} --edges 0 &
+  pidCluster=$!
 
-  done
-  for i in {1..${builtins.toString numRelayNodes}}
-  do
-    node_args="--db-path ${stateDir}/relay-db$i --rebuild-db --listen 127.0.0.1:$((3100 + i)) --json-log ${stateDir}/logs/relay$i.json --logs-prefix ${stateDir}/logs --system-start $system_start --metrics +RTS -N2 -qg -A1m -I0 -T -RTS --node-id relay$i --topology ${topologyFile} --configuration-file $config_files/configuration.yaml --configuration-key ${configurationKey}"
-    echo Launching relay node $i: cardano-node-simple $node_args
-    ${stackExec}cardano-node-simple $node_args &> ${stateDir}/logs/relay$i.log &
-    relay_pid[$i]=$!
-
-  done
   ${ifWallet ''
-    ${utf8LocaleSetting}
-    echo Launching wallet node: ${demoWallet}
-    ${demoWallet} --runtime-args "--system-start $system_start" &> ${stateDir}/logs/wallet.log &
-    wallet_pid=$!
+    ${stackExec}cardano-node                                  \
+      --configuration-file ${configFiles}/configuration.yaml  \
+      --tlscert ${stateDir}/tls/edge/server.crt               \
+      --tlskey ${stateDir}/tls/edge/server.key                \
+      --tlsca ${stateDir}/tls/edge/ca.crt                     \
+      --log-config ${stateDir}/logs/edge.json                 \
+      --topology ${stateDir}/topology/edge.json               \
+      --db-path ${stateDir}/db/edge                           \
+      --wallet-db-path ${stateDir}/wallet-db/edge             \
+      --wallet-address ${walletListen}                        \
+      --wallet-doc-address ${walletDocListen}                 \
+      --system-start $DEMO_SYSTEM_START                       \
+      ${ ifDisableClientAuth "--no-client-auth" }             &
+    pidWallet=$!
 
     # Query node info until synced
     SYNCED=0
     while [[ $SYNCED != 100 ]]
     do
-      PERC=$(curl --cacert ${stateDir}/tls/client/ca.crt --cert ${stateDir}/tls/client/client.pem https://${demoWallet.walletListen}/api/v1/node-info | jq .data.syncProgress.quantity)
-      echo "PERC=$PERC"
+      PERC=$(curl --silent --cacert ${stateDir}/tls/edge/ca.crt --cert ${stateDir}/tls/edge/client.pem https://${walletListen}/api/v1/node-info | jq .data.syncProgress.quantity)
       if [[ $PERC == "100" ]]
       then
         echo Blockchain Synced: $PERC%
@@ -166,18 +124,24 @@ in pkgs.writeScript "demo-cluster" ''
       echo "Importing ${builtins.toString numImportedWallets} poor HD keys/wallet..."
       for i in {0..${builtins.toString numImportedWallets}}
       do
-          echo "Importing key$i.sk ..."
-          curl https://${demoWallet.walletListen}/api/wallets/keys \
-          --cacert ${stateDir}/tls/client/ca.crt \
-          --cert ${stateDir}/tls/client/client.pem \
+          echo "Importing $i.key ..."
+          curl https://localhost:8090/api/internal/import-wallet \
+          --cacert ${stateDir}/tls/edge/ca.crt \
+          --cert ${stateDir}/tls/edge/client.pem \
           -X POST \
           -H 'cache-control: no-cache' \
-          -H 'content-type: application/json' \
-          -d "\"${stateDir}/genesis-keys/generated-keys/poor/key$i.sk\"" | jq .
+          -H 'Content-Type: application/json; charset=utf-8' \
+          -H 'Accept: application/json; charset=utf-8' \
+          -d "{\"filePath\": \"${stateDir}/generated-keys/poor/$i.key\"}" | jq .
       done
     fi
   ''}
   ${ifKeepAlive ''
+    echo "The demo cluster has started and will stop when you exit with Ctrl-C."
+    echo "Log files are in ${stateDir}/logs."
+    ${ifWallet ''
+    echo "Use ${stateDir}/curl to make requests to the wallet."
+    ''}
     sleep infinity
   ''}
 ''

@@ -27,7 +27,6 @@ import qualified Control.Concurrent as Conc
 import           Control.Monad.IO.Class (MonadIO (..))
 import           Data.Time.Units (Microsecond, TimeUnit, convertUnit,
                      toMicroseconds)
-import           System.Wlog (HasLoggerName (..))
 import           UnliftIO (MonadUnliftIO)
 import           UnliftIO.Async (async, cancel, concurrently, forConcurrently,
                      mapConcurrently, race, wait, withAsync,
@@ -43,11 +42,19 @@ currentTimeUnits :: (TimeUnit t, MonadIO m) => m t
 currentTimeUnits = convertUnit <$> currentTime
 
 -- toMicroseconds :: TimeUnit t => t -> Integer
--- then we cast to an Int. Hopefully it fits!
+-- Use Integer to avoid potential Int overflow.
 delay :: (TimeUnit t, MonadIO m)
          => t
          -> m ()
-delay time = liftIO (Conc.threadDelay (fromIntegral (toMicroseconds time)))
+delay =
+    liftIO . sleep . toMicroseconds
+  where
+    sleep :: Integer -> IO ()
+    sleep time = do
+        let maxWait = min time $ toInteger (maxBound :: Int)
+        Conc.threadDelay (fromInteger maxWait)
+        when (maxWait /= time) $ sleep (time - maxWait)
+
 
 -- | This function is analogous to `System.Timeout.timeout`. It's
 -- based on `race` and `delay`.
@@ -60,7 +67,3 @@ newSharedAtomic = newMVar
 
 modifySharedAtomic :: MonadUnliftIO m => MVar a -> (a -> m (a, b)) -> m b
 modifySharedAtomic = modifyMVar
-
-instance HasLoggerName IO where
-    askLoggerName = return "*production*"
-    modifyLoggerName = const id

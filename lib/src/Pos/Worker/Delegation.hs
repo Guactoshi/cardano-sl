@@ -9,7 +9,6 @@ import           Universum
 import           Control.Lens ((%=))
 import           Data.Time.Clock (UTCTime, addUTCTime)
 import           Data.Time.Units (Second)
-import           System.Wlog (WithLogger)
 
 import           Pos.Chain.Delegation (HasDlgConfiguration, MonadDelegation,
                      dlgMessageCacheTimeout, dwMessageCache)
@@ -21,6 +20,7 @@ import           Pos.Infra.Reporting (MonadReporting, reportOrLogE)
 import           Pos.Infra.Shutdown (HasShutdownContext)
 import           Pos.Util (microsecondsToUTC)
 import           Pos.Util.LRU (filterLRU)
+import           Pos.Util.Wlog (WithLogger)
 
 -- | This is a subset of 'WorkMode'.
 type DlgWorkerConstraint ctx m
@@ -36,8 +36,8 @@ type DlgWorkerConstraint ctx m
 
 
 -- | All workers specific to proxy sertificates processing.
-dlgWorkers :: (DlgWorkerConstraint ctx m) => [Diffusion m -> m ()]
-dlgWorkers = [\_ -> dlgInvalidateCaches]
+dlgWorkers :: (DlgWorkerConstraint ctx m) => [ (Text, Diffusion m -> m ()) ]
+dlgWorkers = [ ("delegation worker", \_ -> dlgInvalidateCaches) ]
 
 -- | Runs proxy caches invalidating action every second.
 dlgInvalidateCaches :: DlgWorkerConstraint ctx m => m ()

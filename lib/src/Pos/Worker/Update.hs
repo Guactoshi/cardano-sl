@@ -10,11 +10,13 @@ import           Universum
 
 import           Formatting (build, sformat, (%))
 import           Serokell.Util.Text (listJsonIndent)
-import           System.Wlog (logDebug, logInfo)
 
+import           Pos.Chain.Genesis as Genesis (Config (..),
+                     configBlkSecurityParam, configBlockVersionData,
+                     configEpochSlots)
 import           Pos.Chain.Update (ConfirmedProposalState (..),
-                     curSoftwareVersion)
-import           Pos.Core.Update (SoftwareVersion (..), UpdateProposal (..))
+                     SoftwareVersion (..), UpdateConfiguration,
+                     UpdateProposal (..), curSoftwareVersion)
 import           Pos.DB.Update (UpdateContext (..), getConfirmedProposals,
                      processNewSlot)
 import           Pos.Infra.Diffusion.Types (Diffusion)
@@ -25,37 +27,38 @@ import           Pos.Infra.Slotting.Util (ActionTerminationPolicy (..),
 import           Pos.Listener.Update (UpdateMode)
 import           Pos.Network.Update.Download (downloadUpdate)
 import           Pos.Util.Util (lensOf)
+import           Pos.Util.Wlog (logDebug, logInfo)
 
 -- | Update System related workers.
 usWorkers
-    :: forall ctx m.
-       ( UpdateMode ctx m
-       )
-    => [Diffusion m -> m ()]
-usWorkers = [processNewSlotWorker, checkForUpdateWorker]
+    :: forall ctx m . UpdateMode ctx m => Genesis.Config -> [ (Text, Diffusion m -> m ()) ]
+usWorkers genesisConfig = [ ("us new slot", processNewSlotWorker), ("us check updates", checkForUpdateWorker) ]
   where
+    epochSlots = configEpochSlots genesisConfig
+    k = configBlkSecurityParam genesisConfig
     -- These are two separate workers. We want them to run in parallel
     -- and not affect each other.
     processNewSlotParams = defaultOnNewSlotParams
-        { onspTerminationPolicy =
-              NewSlotTerminationPolicy "Update.processNewSlot"
+        { onspTerminationPolicy = NewSlotTerminationPolicy
+            "Update.processNewSlot"
         }
-    processNewSlotWorker = \_ ->
-        onNewSlot processNewSlotParams $ \s ->
-            recoveryCommGuard "processNewSlot in US" $ do
+    processNewSlotWorker _ =
+        onNewSlot epochSlots processNewSlotParams $ \s ->
+            recoveryCommGuard k "processNewSlot in US" $ do
                 logDebug "Updating slot for US..."
-                processNewSlot s
-    checkForUpdateWorker = \_ ->
-        onNewSlot defaultOnNewSlotParams $ \_ ->
-            recoveryCommGuard "checkForUpdate" (checkForUpdate @ctx @m)
+                processNewSlot (configBlockVersionData genesisConfig) s
+    checkForUpdateWorker _ =
+        onNewSlot epochSlots defaultOnNewSlotParams $ \_ ->
+            recoveryCommGuard k "checkForUpdate" (checkForUpdate @ctx @m)
 
 checkForUpdate ::
        forall ctx m. UpdateMode ctx m
     => m ()
 checkForUpdate = do
     logDebug "Checking for update..."
+    uc <- view (lensOf @UpdateConfiguration)
     confirmedProposals <-
-        getConfirmedProposals (Just $ svNumber curSoftwareVersion)
+        getConfirmedProposals uc . Just . svNumber $ curSoftwareVersion uc
     case nonEmpty confirmedProposals of
         Nothing ->
             logDebug

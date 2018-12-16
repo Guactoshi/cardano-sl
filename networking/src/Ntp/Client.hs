@@ -5,8 +5,8 @@
 {-# LANGUAGE NamedFieldPuns      #-}
 {-# LANGUAGE NoImplicitPrelude   #-}
 {-# LANGUAGE RankNTypes          #-}
+{-# LANGUAGE RecordWildCards     #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TypeApplications    #-}
 
 -- | This module implements functionality of NTP client.
 
@@ -21,9 +21,8 @@ module Ntp.Client
 import           Universum hiding (Last, catch)
 
 import           Control.Concurrent (threadDelay)
-import           Control.Concurrent.Async (async, cancel, concurrently_, race,
-                     withAsync)
-import           Control.Concurrent.STM (TVar, modifyTVar', retry)
+import           Control.Concurrent.Async (async, concurrently_, race)
+import           Control.Concurrent.STM (TVar, check, modifyTVar', retry)
 import           Control.Exception (Exception, IOException, catch, handle)
 import           Control.Monad (forever)
 import           Data.Aeson (FromJSON (..), ToJSON (..), genericParseJSON,
@@ -40,7 +39,6 @@ import           Data.Typeable (Typeable)
 import           Formatting (sformat, shown, (%))
 import qualified Network.Socket as Socket
 import           Network.Socket.ByteString (recvFrom)
-import qualified System.Wlog as Wlog
 
 import           Ntp.Packet (NtpOffset, NtpPacket (..), clockOffset,
                      mkNtpPacket, ntpPacketSize)
@@ -49,6 +47,7 @@ import           Ntp.Util (AddrFamily (..), Addresses, Sockets,
                      logDebug, logInfo, logWarning, ntpTrace, resolveNtpHost,
                      runWithAddrFamily, sendPacket, udpLocalAddresses)
 import           Pos.Util.Trace (traceWith)
+import qualified Pos.Util.Wlog as Wlog
 
 data NtpStatus =
       -- | The difference between NTP time and local system time
@@ -72,6 +71,20 @@ data NtpClientSettings = NtpClientSettings
       -- some servers failed to respond in time, but never an empty list
     }
 
+-- Written for JSON golden decode only tests. Only
+-- the fields ntpServers, ntpResponseTimeout and ntpPollDelay
+-- end up in the JSON encoding of `Configuration`. Also,
+-- equality testing of a function does not make sense.
+
+instance Eq NtpClientSettings where
+    (==) (NtpClientSettings svs  rT  pDel  _)
+         (NtpClientSettings svs' rT' pDel' _) = all (== True) [ svs == svs'
+                                                              , rT == rT'
+                                                              , pDel == pDel'
+                                                              ]
+
+
+
 data NtpClient = NtpClient
     { ncSockets  :: TVar Sockets
       -- ^ Ntp client sockets: ipv4 / ipv6 / both.
@@ -84,7 +97,7 @@ data NtpClient = NtpClient
       -- once all responses arrived.
     , ncSettings :: NtpClientSettings
       -- ^ Ntp client configuration.
-    }
+    } deriving Eq
 
 data NtpConfiguration = NtpConfiguration
     {
@@ -95,7 +108,7 @@ data NtpConfiguration = NtpConfiguration
     , ntpcPollDelay       :: !Integer
       -- ^ how long to wait between sending requests to the ntp servers (in
       -- microseconds)
-    } deriving (Show, Generic)
+    } deriving (Eq, Generic, Show)
 
 instance FromJSON NtpConfiguration where
     parseJSON = genericParseJSON defaultOptions
@@ -108,8 +121,7 @@ ntpClientSettings NtpConfiguration {..} = NtpClientSettings
     { ntpServers         = ntpcServers
     , ntpResponseTimeout = fromMicroseconds $ ntpcResponseTimeout
     , ntpPollDelay       = fromMicroseconds $ ntpcPollDelay
-    , ntpSelection       = minimum . NE.map abs
-    -- ^ Take minmum of received offsets.
+    , ntpSelection       = minimum . NE.map abs -- Take minmum of received offsets.
     }
 
 mkNtpClient :: NtpClientSettings -> TVar NtpStatus -> Sockets -> IO NtpClient
@@ -148,7 +160,6 @@ updateStatus cli = updateStatus' cli fn
            , (Wlog.Info, sformat ("Evaluated clock offset "%shown%"mcs") offset)
            )
 
--- |
 -- Every `ntpPollDelay` we send a request to the list of `ntpServers`.  Before
 -- sending a request, we put `NtpSyncPending` to `ncState`.  After sending
 -- all requests we wait until either all servers responded or
@@ -157,30 +168,25 @@ updateStatus cli = updateStatus' cli fn
 -- drift.
 sendLoop :: NtpClient -> [Addresses] -> IO ()
 sendLoop cli addrs = do
-
-
     let respTimeout = ntpResponseTimeout (ncSettings cli)
     let poll        = ntpPollDelay (ncSettings cli)
 
-    () <- withAsync
-        (do
-            -- wait for responses and update status
-            _ <- timeout respTimeout waitForResponses
-            updateStatus cli
-        )
-        (\a -> do
-            -- send packets and wait until end of poll delay
-            sock <- atomically $ readTVar $ ncSockets cli
-            pack <- mkNtpPacket
-            sendPacket sock pack addrs
+    -- send packets and wait until end of poll delay
+    sock <- atomically $ readTVar $ ncSockets cli
+    pack <- mkNtpPacket
+    sendPacket sock pack addrs
 
-            threadDelay $ fromIntegral poll
-            cancel a
-        )
+    _ <- timeout respTimeout waitForResponses
+    updateStatus cli
+    -- after @'updateStatus'@ @'ntpStatus'@ is guaranteed to be
+    -- different from @'NtpSyncPending'@, now we can wait until it was
+    -- changed back to @'NtpSyncPending'@ to force a request.
+    _ <- timeout poll waitForRequest
 
     -- reset state & status before next loop
     atomically $ writeTVar (ncState cli) []
     atomically $ writeTVar (ncStatus cli) NtpSyncPending
+
     sendLoop cli addrs
 
     where
@@ -191,6 +197,14 @@ sendLoop cli addrs = do
                 when (length resps < svs)
                     retry
             logDebug "collected all responses"
+
+        -- Wait for a request to force an ntp check.
+        waitForRequest =
+            atomically $ do
+                status <- readTVar $ ncStatus cli
+                check (status == NtpSyncPending)
+                return ()
+
 
 -- |
 -- Start listening for responses on the socket @'ncSockets'@

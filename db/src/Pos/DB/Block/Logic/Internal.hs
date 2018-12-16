@@ -1,5 +1,6 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE Rank2Types          #-}
+{-# LANGUAGE RecordWildCards     #-}
 
 -- | Unsafe functions for block application/rollback, some constraint sets
 -- and some utilities. Mostly needed for use in 'Pos.Lrc' -- using lrc
@@ -32,21 +33,23 @@ import           Formatting (sformat, (%))
 import           Serokell.Util.Text (listJson)
 import           UnliftIO (MonadUnliftIO)
 
-import           Pos.Chain.Block (Blund, Undo (undoDlg, undoTx, undoUS))
+import           Pos.Chain.Block (Block, Blund, ComponentBlock (..),
+                     GenesisBlock, IsGenesisHeader, MainBlock,
+                     Undo (undoDlg, undoTx, undoUS), gbHeader, headerHash,
+                     mainBlockDlgPayload, mainBlockSscPayload,
+                     mainBlockTxPayload, mainBlockUpdatePayload)
 import           Pos.Chain.Delegation (DlgBlock, DlgBlund, MonadDelegation)
+import           Pos.Chain.Genesis as Genesis (Config (..),
+                     configBlkSecurityParam, configBlockVersionData,
+                     configEpochSlots)
 import           Pos.Chain.Ssc (HasSscConfiguration, MonadSscMem, SscBlock)
 import           Pos.Chain.Txp (TxpConfiguration)
 import           Pos.Chain.Update (PollModifier)
 import           Pos.Core (epochIndexL)
-import           Pos.Core.Block (Block, ComponentBlock (..), GenesisBlock,
-                     IsGenesisHeader, MainBlock, gbHeader, headerHash,
-                     mainBlockDlgPayload, mainBlockSscPayload,
-                     mainBlockTxPayload, mainBlockUpdatePayload)
 import           Pos.Core.Chrono (NE, NewestFirst (..), OldestFirst (..))
 import           Pos.Core.Exception (assertionFailed)
+import           Pos.Core.NetworkMagic (makeNetworkMagic)
 import           Pos.Core.Reporting (MonadReporting)
-import           Pos.Core.Update (BlockVersion, BlockVersionData)
-import           Pos.Crypto (ProtocolMagic)
 import           Pos.DB (MonadDB, MonadDBRead, MonadGState, SomeBatchOp (..))
 import           Pos.DB.Block.BListener (MonadBListener)
 import           Pos.DB.Block.GState.SanityCheck (sanityCheckDB)
@@ -124,16 +127,16 @@ type MonadMempoolNormalization ctx m
 -- | Normalize mempool.
 normalizeMempool
     :: MonadMempoolNormalization ctx m
-    => ProtocolMagic
+    => Genesis.Config
     -> TxpConfiguration
     -> m ()
-normalizeMempool pm txpConfig = do
+normalizeMempool genesisConfig txpConfig = do
     -- We normalize all mempools except the delegation one.
     -- That's because delegation mempool normalization is harder and is done
     -- within block application.
-    sscNormalize pm
-    txpNormalize pm txpConfig
-    usNormalize
+    sscNormalize genesisConfig
+    txpNormalize genesisConfig txpConfig
+    usNormalize (configBlockVersionData genesisConfig)
 
 -- | Applies a definitely valid prefix of blocks. This function is unsafe,
 -- use it only if you understand what you're doing. That means you can break
@@ -143,14 +146,12 @@ normalizeMempool pm txpConfig = do
 applyBlocksUnsafe
     :: ( MonadBlockApply ctx m
        )
-    => ProtocolMagic
-    -> BlockVersion
-    -> BlockVersionData
+    => Genesis.Config
     -> ShouldCallBListener
     -> OldestFirst NE Blund
     -> Maybe PollModifier
     -> m ()
-applyBlocksUnsafe pm bv bvd scb blunds pModifier = do
+applyBlocksUnsafe genesisConfig scb blunds pModifier = do
     -- Check that all blunds have the same epoch.
     unless (null nextEpoch) $ assertionFailed $
         sformat ("applyBlocksUnsafe: tried to apply more than we should"%
@@ -170,7 +171,7 @@ applyBlocksUnsafe pm bv bvd scb blunds pModifier = do
         (b@(Left _,_):|(x:xs)) -> app' (b:|[]) >> app' (x:|xs)
         _                      -> app blunds
   where
-    app x = applyBlocksDbUnsafeDo pm bv bvd scb x pModifier
+    app x = applyBlocksDbUnsafeDo genesisConfig scb x pModifier
     app' = app . OldestFirst
     (thisEpoch, nextEpoch) =
         spanSafe ((==) `on` view (_1 . epochIndexL)) $ getOldestFirst blunds
@@ -178,25 +179,27 @@ applyBlocksUnsafe pm bv bvd scb blunds pModifier = do
 applyBlocksDbUnsafeDo
     :: ( MonadBlockApply ctx m
        )
-    => ProtocolMagic
-    -> BlockVersion
-    -> BlockVersionData
+    => Genesis.Config
     -> ShouldCallBListener
     -> OldestFirst NE Blund
     -> Maybe PollModifier
     -> m ()
-applyBlocksDbUnsafeDo pm bv bvd scb blunds pModifier = do
+applyBlocksDbUnsafeDo genesisConfig scb blunds pModifier = do
     let blocks = fmap fst blunds
     -- Note: it's important to do 'slogApplyBlocks' first, because it
     -- puts blocks in DB.
-    slogBatch <- slogApplyBlocks scb blunds
+    let nm = makeNetworkMagic (configProtocolMagic genesisConfig)
+    slogBatch <- slogApplyBlocks nm
+                                 (configBlkSecurityParam genesisConfig)
+                                 scb
+                                 blunds
     TxpGlobalSettings {..} <- view (lensOf @TxpGlobalSettings)
-    usBatch <- SomeBatchOp <$> usApplyBlocks pm bv (map toUpdateBlock blocks) pModifier
+    usBatch <- SomeBatchOp <$> usApplyBlocks genesisConfig (map toUpdateBlock blocks) pModifier
     delegateBatch <- SomeBatchOp <$> dlgApplyBlocks (map toDlgBlund blunds)
     txpBatch <- tgsApplyBlocks $ map toTxpBlund blunds
     sscBatch <- SomeBatchOp <$>
         -- TODO: pass not only 'Nothing'
-        sscApplyBlocks pm bvd (map toSscBlock blocks) Nothing
+        sscApplyBlocks genesisConfig (map toSscBlock blocks) Nothing
     GS.writeBatchGState
         [ delegateBatch
         , usBatch
@@ -204,26 +207,30 @@ applyBlocksDbUnsafeDo pm bv bvd scb blunds pModifier = do
         , sscBatch
         , slogBatch
         ]
-    sanityCheckDB
+    sanityCheckDB $ configGenesisData genesisConfig
 
 -- | Rollback sequence of blocks, head-newest order expected with head being
 -- current tip. It's also assumed that lock on block db is taken already.
 rollbackBlocksUnsafe
     :: MonadBlockApply ctx m
-    => ProtocolMagic
+    => Genesis.Config
     -> BypassSecurityCheck -- ^ is rollback for more than k blocks allowed?
     -> ShouldCallBListener
     -> NewestFirst NE Blund
     -> m ()
-rollbackBlocksUnsafe pm bsc scb toRollback = do
-    slogRoll <- slogRollbackBlocks bsc scb toRollback
+rollbackBlocksUnsafe genesisConfig bsc scb toRollback = do
+    slogRoll <- slogRollbackBlocks (makeNetworkMagic $ configProtocolMagic genesisConfig)
+                                   (configProtocolConstants genesisConfig)
+                                   bsc
+                                   scb
+                                   toRollback
     dlgRoll <- SomeBatchOp <$> dlgRollbackBlocks (map toDlgBlund toRollback)
     usRoll <- SomeBatchOp <$> usRollbackBlocks
                   (toRollback & each._2 %~ undoUS
                               & each._1 %~ toUpdateBlock)
     TxpGlobalSettings {..} <- view (lensOf @TxpGlobalSettings)
     txRoll <- tgsRollbackBlocks $ map toTxpBlund toRollback
-    sscBatch <- SomeBatchOp <$> sscRollbackBlocks
+    sscBatch <- SomeBatchOp <$> sscRollbackBlocks (configEpochSlots genesisConfig)
         (map (toSscBlock . fst) toRollback)
     GS.writeBatchGState
         [ dlgRoll
@@ -237,8 +244,8 @@ rollbackBlocksUnsafe pm bsc scb toRollback = do
     -- We don't normalize other mempools, because they are normalized
     -- in 'applyBlocksUnsafe' and we always ensure that some blocks
     -- are applied after rollback.
-    dlgNormalizeOnRollback pm
-    sanityCheckDB
+    dlgNormalizeOnRollback genesisConfig
+    sanityCheckDB $ configGenesisData genesisConfig
 
 
 toComponentBlock :: (MainBlock -> payload) -> Block -> ComponentBlock payload

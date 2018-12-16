@@ -24,7 +24,6 @@ import           Universum
 
 import           Control.Lens (lens, makeLensesWith)
 import           Data.Time.Clock (UTCTime)
-import           System.Wlog (LoggerConfig)
 
 import           Pos.Chain.Block (HasSlogContext (..), HasSlogGState (..),
                      LastKnownHeader, LastKnownHeaderTag, SlogContext (..))
@@ -52,6 +51,7 @@ import           Pos.Network.Block.RetrievalQueue (BlockRetrievalQueue,
 import           Pos.Util.Lens (postfixLFields)
 import           Pos.Util.UserSecret (HasUserSecret (..), UserSecret)
 import           Pos.Util.Util (HasLens (..))
+import           Pos.Util.Wlog (LoggerConfig)
 
 ----------------------------------------------------------------------------
 -- NodeContext

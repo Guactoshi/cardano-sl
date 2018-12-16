@@ -1,4 +1,5 @@
-{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE RankNTypes      #-}
+{-# LANGUAGE RecordWildCards #-}
 
 -- | Server which deals with blocks processing.
 
@@ -8,24 +9,24 @@ module Pos.Network.Block.Retrieval
 
 import           Universum
 
-import           Control.Concurrent.STM (putTMVar, swapTMVar, tryReadTBQueue,
-                     tryReadTMVar, tryTakeTMVar)
-import           Control.Exception.Safe (handleAny)
+import           Control.Concurrent.STM (TVar, newTVar, putTMVar, swapTMVar,
+                     swapTVar, tryReadTBQueue, tryReadTMVar, tryTakeTMVar)
+import           Control.Exception.Safe (IOException, handleAny)
 import           Control.Lens (to)
 import           Control.Monad.STM (retry)
 import qualified Data.List.NonEmpty as NE
 import           Data.Time.Units (Second)
-import           Formatting (build, int, sformat, (%))
-import           System.Wlog (logDebug, logError, logInfo, logWarning)
+import           Formatting (build, int, sformat, shown, (%))
 
+import           Pos.Chain.Block (Block, BlockHeader, HasHeaderHash (..),
+                     HeaderHash, headerHashF)
+import           Pos.Chain.Genesis as Genesis (Config)
 import           Pos.Chain.Txp (TxpConfiguration)
 import           Pos.Core (difficultyL, isMoreDifficult)
-import           Pos.Core.Block (Block, BlockHeader, HasHeaderHash (..),
-                     HeaderHash)
 import           Pos.Core.Chrono (NE, OldestFirst (..), _OldestFirst)
 import           Pos.Core.Conc (delay)
 import           Pos.Core.Reporting (HasMisbehaviorMetrics)
-import           Pos.Crypto (ProtocolMagic, shortHashF)
+import           Pos.Crypto (shortHashF)
 import           Pos.DB.Block (ClassifyHeaderRes (..), classifyNewHeader,
                      getHeadersOlderExp)
 import qualified Pos.DB.BlockIndex as DB
@@ -40,6 +41,7 @@ import           Pos.Network.Block.RetrievalQueue (BlockRetrievalQueueTag,
                      BlockRetrievalTask (..))
 import           Pos.Network.Block.WorkMode (BlockWorkMode)
 import           Pos.Util.Util (HasLens (..))
+import           Pos.Util.Wlog (logDebug, logError, logInfo, logWarning)
 
 -- I really don't like join
 {-# ANN retrievalWorker ("HLint: ignore Use join" :: Text) #-}
@@ -59,10 +61,10 @@ retrievalWorker
        ( BlockWorkMode ctx m
        , HasMisbehaviorMetrics ctx
        )
-    => ProtocolMagic
+    => Genesis.Config
     -> TxpConfiguration
     -> Diffusion m -> m ()
-retrievalWorker pm txpConfig diffusion = do
+retrievalWorker genesisConfig txpConfig diffusion = do
     logInfo "Starting retrievalWorker loop"
     mainLoop
   where
@@ -112,9 +114,9 @@ retrievalWorker pm txpConfig diffusion = do
     handleContinues nodeId header = do
         let hHash = headerHash header
         logDebug $ "handleContinues: " <> pretty hHash
-        classifyNewHeader pm header >>= \case
+        classifyNewHeader genesisConfig header >>= \case
             CHContinues ->
-                void $ getProcessBlocks pm txpConfig diffusion nodeId (headerHash header) [hHash]
+                void $ getProcessBlocks genesisConfig txpConfig diffusion nodeId hHash [hHash]
             res -> logDebug $
                 "processContHeader: expected header to " <>
                 "be continuation, but it's " <> show res
@@ -124,7 +126,7 @@ retrievalWorker pm txpConfig diffusion = do
     -- enter recovery mode.
     handleAlternative nodeId header = do
         logDebug $ "handleAlternative: " <> pretty (headerHash header)
-        classifyNewHeader pm header >>= \case
+        classifyNewHeader genesisConfig header >>= \case
             CHInvalid _ ->
                 logError "handleAlternative: invalid header got into retrievalWorker queue"
             CHUseless _ ->
@@ -153,10 +155,14 @@ retrievalWorker pm txpConfig diffusion = do
     -- again.
     handleRecoveryE nodeId rHeader e = do
         -- REPORT:ERROR 'reportOrLogW' in block retrieval worker/recovery.
-        reportOrLogW (sformat
-            ("handleRecoveryE: error handling nodeId="%build%", header="%build%": ")
-            nodeId (headerHash rHeader)) e
-        dropRecoveryHeaderAndRepeat pm diffusion nodeId
+        reportOrLogW (sformat errfmt nodeId (headerHash rHeader)) e
+            `catch` handleIOException
+        dropRecoveryHeaderAndRepeat genesisConfig diffusion nodeId
+        where
+            errfmt = "handleRecoveryE: error handling nodeId="%build%", header="%headerHashF%": "
+
+            handleIOException :: IOException -> m ()
+            handleIOException _ = logError $ sformat (errfmt%shown) nodeId (headerHash rHeader) e
 
     -- Recovery handling. We assume that header in the recovery variable is
     -- appropriate and just query headers/blocks.
@@ -169,8 +175,13 @@ retrievalWorker pm txpConfig diffusion = do
             throwM $ DialogUnexpected $ "handleRecovery: recovery header is " <>
                                         "already present in db"
         logDebug "handleRecovery: fetching blocks"
-        checkpoints <- toList <$> getHeadersOlderExp Nothing
-        void $ streamProcessBlocks pm txpConfig diffusion nodeId (headerHash rHeader) checkpoints
+        checkpoints <- toList <$> getHeadersOlderExp genesisConfig Nothing
+        void $ streamProcessBlocks genesisConfig
+                                   txpConfig
+                                   diffusion
+                                   nodeId
+                                   (headerHash rHeader)
+                                   checkpoints
 
 ----------------------------------------------------------------------------
 -- Entering and exiting recovery mode
@@ -256,8 +267,12 @@ dropRecoveryHeader nodeId = do
 
 -- | Drops the recovery header and, if it was successful, queries the tips.
 dropRecoveryHeaderAndRepeat
-    :: BlockWorkMode ctx m => ProtocolMagic -> Diffusion m -> NodeId -> m ()
-dropRecoveryHeaderAndRepeat pm diffusion nodeId = do
+    :: BlockWorkMode ctx m
+    => Genesis.Config
+    -> Diffusion m
+    -> NodeId
+    -> m ()
+dropRecoveryHeaderAndRepeat genesisConfig diffusion nodeId = do
     kicked <- dropRecoveryHeader nodeId
     when kicked $ attemptRestartRecovery
   where
@@ -265,7 +280,7 @@ dropRecoveryHeaderAndRepeat pm diffusion nodeId = do
         logDebug "Attempting to restart recovery"
         -- FIXME why delay? Why 2 seconds?
         delay (2 :: Second)
-        handleAny handleRecoveryTriggerE $ triggerRecovery pm diffusion
+        handleAny handleRecoveryTriggerE $ triggerRecovery genesisConfig diffusion
         logDebug "Attempting to restart recovery over"
     handleRecoveryTriggerE =
         -- REPORT:ERROR 'reportOrLogE' somewhere in block retrieval.
@@ -275,18 +290,16 @@ dropRecoveryHeaderAndRepeat pm diffusion nodeId = do
 -- Returns only if blocks were successfully downloaded and
 -- processed. Throws exception if something goes wrong.
 getProcessBlocks
-    :: forall ctx m.
-       ( BlockWorkMode ctx m
-       , HasMisbehaviorMetrics ctx
-       )
-    => ProtocolMagic
+    :: forall ctx m
+     . (BlockWorkMode ctx m, HasMisbehaviorMetrics ctx)
+    => Genesis.Config
     -> TxpConfiguration
     -> Diffusion m
     -> NodeId
     -> HeaderHash
     -> [HeaderHash]
     -> m ()
-getProcessBlocks pm txpConfig diffusion nodeId desired checkpoints = do
+getProcessBlocks genesisConfig txpConfig diffusion nodeId desired checkpoints = do
     result <- Diffusion.getBlocks diffusion nodeId desired checkpoints
     case OldestFirst <$> nonEmpty (getOldestFirst result) of
       Nothing -> do
@@ -299,7 +312,7 @@ getProcessBlocks pm txpConfig diffusion nodeId desired checkpoints = do
           logDebug $ sformat
               ("Retrieved "%int%" blocks")
               (blocks ^. _OldestFirst . to NE.length)
-          handleBlocks pm txpConfig blocks diffusion
+          handleBlocks genesisConfig txpConfig blocks diffusion
           -- If we've downloaded any block with bigger
           -- difficulty than ncRecoveryHeader, we're
           -- gracefully exiting recovery mode.
@@ -321,29 +334,48 @@ getProcessBlocks pm txpConfig diffusion nodeId desired checkpoints = do
 -- Will fall back to getProcessBlocks if streaming is disabled
 -- or not supported by peer.
 streamProcessBlocks
-    :: forall ctx m.
-       ( BlockWorkMode ctx m
-       , HasMisbehaviorMetrics ctx
-       )
-    => ProtocolMagic
+    :: forall ctx m
+     . (BlockWorkMode ctx m, HasMisbehaviorMetrics ctx)
+    => Genesis.Config
     -> TxpConfiguration
     -> Diffusion m
     -> NodeId
     -> HeaderHash
     -> [HeaderHash]
     -> m ()
-streamProcessBlocks pm txpConfig diffusion nodeId desired checkpoints = do
+streamProcessBlocks genesisConfig txpConfig diffusion nodeId desired checkpoints = do
     logInfo "streaming start"
-    r <- Diffusion.streamBlocks diffusion nodeId desired checkpoints writeCallback
+    mostDifficultBlock <- atomically $ newTVar Nothing
+    r <- Diffusion.streamBlocks diffusion nodeId desired checkpoints (writeCallback mostDifficultBlock)
     case r of
          Nothing -> do
              logInfo "streaming not supported, reverting to batch mode"
-             getProcessBlocks pm txpConfig diffusion nodeId desired checkpoints
+             getProcessBlocks genesisConfig txpConfig diffusion nodeId desired checkpoints
          Just _  -> do
              logInfo "streaming done"
-             return ()
+
+             recHeaderVar <- view (lensOf @RecoveryHeaderTag)
+             exitedRecovery <- atomically $ do
+                 mbMostDifficult <- readTVar mostDifficultBlock
+                 mbRecHeader <- tryReadTMVar recHeaderVar
+                 case (mbMostDifficult, mbRecHeader) of
+                      (Nothing, _)                 -> pure False -- We have not gotten a single block
+                      (Just _, Nothing)            -> pure False -- We where not in recovery?
+                      (Just mostDifficult, Just (_, recHeader)) ->
+                          if (mostDifficult ^. difficultyL) >= (recHeader ^. difficultyL)
+                             then isJust <$> tryTakeTMVar recHeaderVar
+                             else pure False
+
+             if exitedRecovery
+                then do
+                    logInfo "Recovery mode exited gracefully on receiving block we needed"
+                    return ()
+                else do -- Streaming stopped but we didn't make any progress
+                    _ <- dropRecoveryHeaderAndRepeat genesisConfig diffusion nodeId
+                    return ()
   where
-    writeCallback :: [Block] -> m ()
-    writeCallback [] = return ()
-    writeCallback (block:blocks) =
-        handleBlocks pm txpConfig (OldestFirst (NE.reverse $ block :| blocks)) diffusion
+    writeCallback :: (TVar (Maybe Block)) -> [Block] -> m ()
+    writeCallback _ [] = return ()
+    writeCallback mostDifficultBlock (block:blocks) = do
+        _ <- atomically $ swapTVar mostDifficultBlock (Just block)
+        handleBlocks genesisConfig txpConfig (OldestFirst (NE.reverse $ block :| blocks)) diffusion

@@ -1,13 +1,14 @@
 name:                cardano-sl-util
-version:             1.3.0
+version:             2.0.0
 synopsis:            Cardano SL - general utilities
 description:         This package contains utility functions not specific
                      to Cardano SL which extend 3rd party libraries or implement
                      something from scratch.
 license:             MIT
 license-file:        LICENSE
-author:              Serokell
-maintainer:          hi@serokell.io
+homepage:            https://github.com/input-output-hk/cardano-sl
+author:              IOHK
+maintainer:          support@iohk.io
 copyright:           2016 IOHK
 category:            Currency
 build-type:          Simple
@@ -15,6 +16,7 @@ extra-source-files:  README.md
 cabal-version:       >=1.10
 
 library
+  hs-source-dirs:      src
   exposed-modules:
                        Pos.Util
 
@@ -27,9 +29,18 @@ library
                        Pos.Util.AssertMode
                        Pos.Util.Filesystem
                        Pos.Util.Future
+                       Pos.Util.Json.Canonical
                        Pos.Util.Json.Parse
                        Pos.Util.Justify
                        Pos.Util.Lens
+                       Pos.Util.Log
+                       Pos.Util.Log.Internal
+                       Pos.Util.Log.LogSafe
+                       Pos.Util.Log.LoggerConfig
+                       Pos.Util.Log.LoggerName
+                       Pos.Util.Log.Severity
+                       Pos.Util.Log.Structured
+                       Pos.Util.Wlog.Compatibility
                        Pos.Util.LoggerName
                        Pos.Util.LRU
                        Pos.Util.Modifier
@@ -39,12 +50,19 @@ library
                        Pos.Util.Some
                        Pos.Util.Timer
                        Pos.Util.Trace
+                       Pos.Util.Trace.Unstructured
+                       Pos.Util.Trace.Named
                        Pos.Util.Util
+                       Pos.Util.Wlog
+                       Pos.Util.Log.Rotator
 
   other-modules:
+                       Paths_cardano_sl_util
                        Pos.Util.CompileInfoGit
+                       Pos.Util.Log.Scribes
 
   build-depends:       aeson
+                     , auto-update
                      , base
                      , canonical-json
                      , cborg
@@ -61,10 +79,12 @@ library
                      , filepath
                      , formatting
                      , hashable
+                     , katip
                      , lens
-                     , log-warper >= 1.0.3
                      , lrucache
                      , megaparsec
+                     , mmorph
+                     , monad-control
                      , mtl
                      , optparse-applicative
                      , parsec
@@ -80,10 +100,12 @@ library
                      , time
                      , time-units
                      , transformers
+                     , transformers-base
                      , transformers-lift
                      , universum
                      , unliftio-core
                      , unordered-containers
+                     , yaml
 
   default-language:    Haskell2010
 
@@ -101,7 +123,6 @@ library
                        DefaultSignatures
                        NoImplicitPrelude
                        OverloadedStrings
-                       RecordWildCards
                        TypeApplications
                        TupleSections
                        ViewPatterns
@@ -121,7 +142,7 @@ library
   build-tools: cpphs >= 1.19
   ghc-options: -pgmP cpphs -optP --cpp
 
-test-suite test
+test-suite util-test
   main-is:             test.hs
   hs-source-dirs:      test
   default-language:    Haskell2010
@@ -130,17 +151,25 @@ test-suite test
   other-modules:
                        Spec
                        Test.Pos.Util.Golden
+                       Test.Pos.Util.LogSpec
                        Test.Pos.Util.Modifier
                        Test.Pos.Util.ModifierSpec
+                       Test.Pos.Util.Parallel.Parallelize
                        Test.Pos.Util.QuickCheck.Property
                        Test.Pos.Util.TimerSpec
+                       Test.Pos.Util.TraceSpec
                        Test.Pos.Util.Tripping
+                       Test.Pos.Util.WlogSpec
+                       Test.Pos.Util.LogStructuredSpec
 
   build-depends:       aeson
+                     , aeson-pretty
                      , base
                      , bytestring
                      , async
+                     , canonical-json
                      , cardano-sl-util
+                     , cereal
                      , directory
                      , file-embed
                      , filepath
@@ -150,6 +179,7 @@ test-suite test
                      , pretty-show
                      , QuickCheck
                      , quickcheck-instances
+                     , safecopy
                      , stm
                      , template-haskell
                      , text
@@ -157,6 +187,7 @@ test-suite test
                      , time-units
                      , universum >= 1.1.0
                      , unordered-containers
+  build-tool-depends: hspec-discover:hspec-discover
 
   ghc-options:         -threaded
                        -rtsopts
@@ -178,7 +209,6 @@ test-suite test
                         DefaultSignatures
                         NoImplicitPrelude
                         OverloadedStrings
-                        RecordWildCards
                         TypeApplications
                         TupleSections
                         ViewPatterns

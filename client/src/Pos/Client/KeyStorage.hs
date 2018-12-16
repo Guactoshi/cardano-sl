@@ -5,20 +5,16 @@
 module Pos.Client.KeyStorage
        ( MonadKeysRead (..)
        , MonadKeys (..)
+       , AllUserSecrets (..)
        , getSecretDefault
        , modifySecretPureDefault
        , modifySecretDefault
 
-       , getPrimaryKey
        , getSecretKeys
        , getSecretKeysPlain
        , addSecretKey
        , deleteAllSecretKeys
        , deleteSecretKeyBy
-       , newSecretKey
-       , KeyData
-       , KeyError (..)
-       , AllUserSecrets (..)
        ) where
 
 import           Universum
@@ -27,12 +23,9 @@ import qualified Control.Concurrent.STM as STM
 import           Control.Lens ((<%=), (<>~))
 import           Serokell.Util (modifyTVarS)
 
-import           Pos.Crypto (EncryptedSecretKey, PassPhrase, SecretKey, hash,
-                     runSecureRandom, safeKeyGen)
+import           Pos.Crypto (EncryptedSecretKey, hash)
 import           Pos.Util.UserSecret (HasUserSecret (..), UserSecret, usKeys,
-                     usPrimKey, writeUserSecret)
-
-type KeyData = TVar UserSecret
+                     writeUserSecret)
 
 ----------------------------------------------------------------------
 -- MonadKeys class and default functions
@@ -56,7 +49,7 @@ getSecretDefault = view userSecret >>= atomically . STM.readTVar
 modifySecretPureDefault :: HasKeysContext ctx m => (UserSecret -> UserSecret) -> m ()
 modifySecretPureDefault f = do
     us <- view userSecret
-    void $ atomically $ modifyTVarS us (identity <%= f)
+    atomically $ STM.modifyTVar' us f
 
 modifySecretDefault :: HasKeysContext ctx m => (UserSecret -> UserSecret) -> m ()
 modifySecretDefault f = do
@@ -68,15 +61,12 @@ modifySecretDefault f = do
 -- Helpers
 ----------------------------------------------------------------------
 
-getPrimaryKey :: MonadKeysRead m => m (Maybe SecretKey)
-getPrimaryKey = view usPrimKey <$> getSecret
-
 newtype AllUserSecrets = AllUserSecrets
     { getAllUserSecrets :: [EncryptedSecretKey]
     } deriving (Container)
 
 getSecretKeys :: MonadKeysRead m => m AllUserSecrets
-getSecretKeys = AllUserSecrets . view usKeys <$> getSecret
+getSecretKeys = AllUserSecrets <$> getSecretKeysPlain
 
 getSecretKeysPlain :: MonadKeysRead m => m [EncryptedSecretKey]
 getSecretKeysPlain = view usKeys <$> getSecret
@@ -86,29 +76,11 @@ addSecretKey sk = modifySecret $ \us ->
     if view usKeys us `containsKey` sk
     then us
     else us & usKeys <>~ [sk]
+  where
+    containsKey ls k = hash k `elem` map hash ls
 
 deleteAllSecretKeys :: MonadKeys m => m ()
 deleteAllSecretKeys = modifySecret (usKeys .~ [])
 
 deleteSecretKeyBy :: MonadKeys m => (EncryptedSecretKey -> Bool) -> m ()
 deleteSecretKeyBy predicate = modifySecret (usKeys %~ filter (not . predicate))
-
--- | Helper for generating a new secret key
-newSecretKey :: (MonadIO m, MonadKeys m) => PassPhrase -> m EncryptedSecretKey
-newSecretKey pp = do
-    (_, sk) <- liftIO $ runSecureRandom $ safeKeyGen pp
-    addSecretKey sk
-    pure sk
-
-------------------------------------------------------------------------
--- Common functions
-------------------------------------------------------------------------
-
-containsKey :: [EncryptedSecretKey] -> EncryptedSecretKey -> Bool
-containsKey ls k = hash k `elem` map hash ls
-
-data KeyError =
-    PrimaryKey !Text -- ^ Failed attempt to delete primary key
-    deriving (Show)
-
-instance Exception KeyError

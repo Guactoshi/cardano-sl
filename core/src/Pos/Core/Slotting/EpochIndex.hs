@@ -1,3 +1,5 @@
+{-# LANGUAGE RecordWildCards #-}
+
 module Pos.Core.Slotting.EpochIndex
        ( EpochIndex (..)
        , HasEpochIndex (..)
@@ -17,7 +19,7 @@ import           Text.JSON.Canonical (FromJSON (..), ReportSchemaErrors,
                      ToJSON (..))
 
 import           Pos.Binary.Class (Bi (..))
-import           Pos.Core.Genesis.Canonical ()
+import           Pos.Util.Json.Canonical ()
 import           Pos.Util.Some (Some, liftLensSome)
 
 -- | Index of epoch.
@@ -69,12 +71,14 @@ instance ReportSchemaErrors m => FromJSON m EpochIndex where
 --             Bootstrap era   Reward era
 -- @
 --
+--
+-- | This function has been stubbed out to always return True, since
+-- this codebase will not be decentralized.
 isBootstrapEra
     :: EpochIndex -- ^ Unlock stake epoch
     -> EpochIndex -- ^ Epoch in question (for which we determine whether it
                   --                      belongs to the bootstrap era).
     -> Bool
-isBootstrapEra unlockStakeEpoch epoch =
-    epoch < unlockStakeEpoch
+isBootstrapEra _unlockStakeEpoch _epoch = True
 
 deriveSafeCopySimple 0 'base ''EpochIndex

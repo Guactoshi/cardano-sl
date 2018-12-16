@@ -1,5 +1,3 @@
-{-# OPTIONS_GHC -fno-warn-orphans #-}
-
 -- | Possible failures during SSC verification.
 
 module Pos.Chain.Ssc.Error.Verify
@@ -7,16 +5,15 @@ module Pos.Chain.Ssc.Error.Verify
        , sscIsCriticalVerifyError
        ) where
 
-import           Formatting (bprint, build, ords, stext, (%))
-import qualified Formatting.Buildable
-import           Serokell.Util (listJson)
 import           Universum
 
-import           Pos.Core (EpochIndex, SlotId, StakeholderId)
-import           Pos.Core.Ssc (VssCertificate)
+import           Formatting (bprint, build, stext, (%))
+import qualified Formatting.Buildable
+import           Serokell.Util (listJson)
 
-instance Buildable (StakeholderId, VssCertificate) where
-    build (a, b) = bprint ("(id: "%build%" , cert: "%build%")") a b
+import           Pos.Chain.Ssc.VssCertificate (VssCertificate)
+import           Pos.Core (EpochIndex (..), SlotId, StakeholderId)
+import           Pos.Util.Util (intords)
 
 type NEStIds = NonEmpty StakeholderId
 
@@ -70,7 +67,7 @@ instance Buildable SscVerifyError where
     build (NoRichmen epoch) =
         bprint ("no richmen for epoch"%build) epoch
     build (TossUnknownRichmen epoch) =
-        bprint ("richmen aren't know for "%ords%" epoch") epoch
+        bprint ("richmen aren't know for "%intords%" epoch") (getEpochIndex epoch)
 
     build (CommitmentInvalid ids) =
         bprint ("verifySignedCommitment has failed for some commitments: "%listJson) ids

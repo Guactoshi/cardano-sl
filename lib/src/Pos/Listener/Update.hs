@@ -13,12 +13,11 @@ module Pos.Listener.Update
 import           Universum
 
 import           Formatting (build, sformat, (%))
-import           System.Wlog (WithLogger, logNotice, logWarning)
 import           UnliftIO (MonadUnliftIO)
 
-import           Pos.Chain.Update (HasUpdateConfiguration, UpdateParams)
-import           Pos.Core (ProtocolMagic)
-import           Pos.Core.Update (UpdateProposal (..), UpdateVote (..))
+import           Pos.Chain.Genesis as Genesis (Config)
+import           Pos.Chain.Update (UpdateConfiguration, UpdateParams,
+                     UpdateProposal (..), UpdateVote (..))
 import           Pos.DB.Class (MonadDB, MonadGState)
 import           Pos.DB.Lrc (HasLrcContext)
 import           Pos.DB.Update (UpdateContext, processProposal, processVote)
@@ -28,6 +27,7 @@ import           Pos.Infra.Shutdown.Class (HasShutdownContext)
 import           Pos.Infra.Slotting (MonadSlots)
 import           Pos.Infra.StateLock (StateLock)
 import           Pos.Util.Util (HasLens (..))
+import           Pos.Util.Wlog (WithLogger, logNotice, logWarning)
 
 
 
@@ -42,10 +42,10 @@ type UpdateMode ctx m
       , MonadReader ctx m
       , HasLrcContext ctx
       , HasLens UpdateContext ctx UpdateContext
+      , HasLens UpdateConfiguration ctx UpdateConfiguration
       , HasLens UpdateParams ctx UpdateParams
       , HasLens StateLock ctx StateLock
       , HasShutdownContext ctx
-      , HasUpdateConfiguration
       , MonadReporting m
       , MonadRecoveryInfo ctx m
       , MonadSlots ctx m
@@ -53,17 +53,17 @@ type UpdateMode ctx m
 
 handleProposal
     :: forall ctx m . UpdateMode ctx m
-    => ProtocolMagic
+    => Genesis.Config
     -> (UpdateProposal, [UpdateVote])
     -> m Bool
-handleProposal pm (proposal, votes) = do
-    res <- processProposal pm proposal
+handleProposal genesisConfig (proposal, votes) = do
+    res <- processProposal genesisConfig proposal
     logProp proposal res
     let processed = isRight res
     processed <$ when processed (mapM_ processVoteLog votes)
   where
     processVoteLog :: UpdateVote -> m ()
-    processVoteLog vote = processVote pm vote >>= logVote vote
+    processVoteLog vote = processVote genesisConfig vote >>= logVote vote
     logVote vote (Left cause) =
         logWarning $ sformat ("Proposal is accepted but vote "%build%
                               " is rejected, the reason is: "%build)
@@ -86,11 +86,11 @@ handleProposal pm (proposal, votes) = do
 
 handleVote
     :: UpdateMode ctx m
-    => ProtocolMagic
+    => Genesis.Config
     -> UpdateVote
     -> m Bool
-handleVote pm uv = do
-    res <- processVote pm uv
+handleVote genesisConfig uv = do
+    res <- processVote genesisConfig uv
     logProcess uv res
     pure $ isRight res
   where
